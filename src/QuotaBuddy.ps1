@@ -458,10 +458,9 @@ function Update-Display {
     $ui.MediumSecondaryText.Text = "$($data.SecondaryRemaining)%"
     $ui.MediumPrimaryBar.Value = $data.PrimaryRemaining; $ui.MediumSecondaryBar.Value = $data.SecondaryRemaining
     $ui.MediumPrimaryReset.Text = $primaryResetText; $ui.MediumSecondaryReset.Text = $secondaryResetText
-    $lowest = [Math]::Min($data.PrimaryRemaining, $data.SecondaryRemaining)
-    if ($lowest -le 5) { Set-QuotaState -State 'critical' }
-    elseif ($lowest -le 20) { Set-QuotaState -State 'low' }
-    elseif ($lowest -lt 50) { Set-QuotaState -State 'saving' }
+    if ($data.PrimaryRemaining -le 5) { Set-QuotaState -State 'critical' }
+    elseif ($data.PrimaryRemaining -le 20) { Set-QuotaState -State 'low' }
+    elseif ($data.PrimaryRemaining -lt 50) { Set-QuotaState -State 'saving' }
     else { Set-QuotaState -State 'normal' }
     Update-ResponsiveLayout
 }

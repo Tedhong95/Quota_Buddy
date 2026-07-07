@@ -18,7 +18,7 @@ The first run adds a Windows sign-in startup entry. The panel follows the pet an
 - Adapts its layout to the window width.
 - Changes the indicator color and breathing speed as quota decreases.
 
-The breathing indicator follows the lower of the two quotas: green at 50% or more, yellow at 21%–49%, red at 6%–20%, dark red at 5% or less, and gray when data is unavailable.
+The breathing indicator follows the real-time 5-hour quota: green at 50% or more, yellow at 21%–49%, red at 6%–20%, dark red at 5% or less, and gray when data is unavailable.
 
 ## Privacy
 
