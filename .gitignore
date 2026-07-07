@@ -1,0 +1,8 @@
+# Quota Buddy does not create runtime logs. Ignore accidental local diagnostics.
+*.log
+*.tmp
+*.bak
+quota-cache.json
+*.png
+Thumbs.db
+.DS_Store
