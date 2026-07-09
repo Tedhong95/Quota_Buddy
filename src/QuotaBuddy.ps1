@@ -23,10 +23,12 @@ $script:lastOfficialPoll = [datetime]::MinValue
 $script:defaultDataFile = Join-Path $env:USERPROFILE '.codex\logs_2.sqlite'
 $script:lastMascotWidth = $null
 $script:globalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
+$script:windowPlacementPath = Join-Path $env:USERPROFILE '.codex\quota-buddy-window.json'
 $script:quotaBuddyScriptPath = $PSCommandPath
 $script:singleInstanceMutex = $null
 $script:languageSwitchEvents = @{}
 $script:adjustingResponsiveSize = $false
+$script:restoringWindowPlacement = $false
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -401,6 +403,18 @@ public static class QuotaBuddyWindowProbe
         }, IntPtr.Zero);
         return found;
     }
+
+    public static bool IsCodexRunning()
+    {
+        foreach (Process process in Process.GetProcesses()) {
+            try {
+                if (String.Equals(process.ProcessName, "Codex", StringComparison.OrdinalIgnoreCase)) {
+                    return true;
+                }
+            } catch { }
+        }
+        return false;
+    }
 }
 '@
 }
@@ -556,19 +570,96 @@ function Set-QuotaState {
     $ui.MediumDot.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
 }
 
+function Test-WindowIntersectsVirtualDesktop([double]$Left, [double]$Top, [double]$Width, [double]$Height) {
+    $desktopLeft = [double][Windows.SystemParameters]::VirtualScreenLeft
+    $desktopTop = [double][Windows.SystemParameters]::VirtualScreenTop
+    $desktopRight = $desktopLeft + [double][Windows.SystemParameters]::VirtualScreenWidth
+    $desktopBottom = $desktopTop + [double][Windows.SystemParameters]::VirtualScreenHeight
+    $right = $Left + $Width
+    $bottom = $Top + $Height
+    return ($right -gt $desktopLeft -and $Left -lt $desktopRight -and $bottom -gt $desktopTop -and $Top -lt $desktopBottom)
+}
+
+function Move-WindowIntoVirtualDesktop {
+    $desktopLeft = [double][Windows.SystemParameters]::VirtualScreenLeft
+    $desktopTop = [double][Windows.SystemParameters]::VirtualScreenTop
+    $desktopRight = $desktopLeft + [double][Windows.SystemParameters]::VirtualScreenWidth
+    $desktopBottom = $desktopTop + [double][Windows.SystemParameters]::VirtualScreenHeight
+    $margin = 12.0
+    $maxLeft = $desktopRight - [Math]::Min($window.Width, [double][Windows.SystemParameters]::VirtualScreenWidth) - $margin
+    $maxTop = $desktopBottom - [Math]::Min($window.Height, [double][Windows.SystemParameters]::VirtualScreenHeight) - $margin
+    $window.Left = [Math]::Max($desktopLeft + $margin, [Math]::Min($window.Left, $maxLeft))
+    $window.Top = [Math]::Max($desktopTop + $margin, [Math]::Min($window.Top, $maxTop))
+}
+
+function Save-WindowPlacement {
+    if ($ValidateUI) { return }
+    if ($script:restoringWindowPlacement) { return }
+    if (-not (Test-WindowIntersectsVirtualDesktop $window.Left $window.Top $window.Width $window.Height)) { return }
+    try {
+        $folder = Split-Path $script:windowPlacementPath -Parent
+        if (-not (Test-Path -LiteralPath $folder)) {
+            [void](New-Item -ItemType Directory -Path $folder -Force)
+        }
+        $placement = @{
+            Left = [Math]::Round([double]$window.Left, 2)
+            Top = [Math]::Round([double]$window.Top, 2)
+            Width = [Math]::Round([double]$window.Width, 2)
+            Height = [Math]::Round([double]$window.Height, 2)
+        } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText($script:windowPlacementPath, $placement, [Text.Encoding]::UTF8)
+    } catch { }
+}
+
+function Restore-WindowPlacement {
+    $script:restoringWindowPlacement = $true
+    try {
+        $restored = $false
+        if (Test-Path -LiteralPath $script:windowPlacementPath) {
+            try {
+                $placement = [IO.File]::ReadAllText($script:windowPlacementPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+                if ($null -ne $placement) {
+                    if ($null -ne $placement.PSObject.Properties['Width'] -and $null -ne $placement.Width) {
+                        $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, [double]$placement.Width))
+                    }
+                    if ($null -ne $placement.PSObject.Properties['Height'] -and $null -ne $placement.Height) {
+                        $window.Height = [Math]::Max($window.MinHeight, [Math]::Min($window.MaxHeight, [double]$placement.Height))
+                    }
+                    if ($null -ne $placement.PSObject.Properties['Left'] -and $null -ne $placement.PSObject.Properties['Top']) {
+                        $window.Left = [double]$placement.Left
+                        $window.Top = [double]$placement.Top
+                        $restored = $true
+                    }
+                }
+            } catch { }
+        }
+        if (-not $restored) {
+            $window.Left = [double][Windows.SystemParameters]::WorkArea.Right - $window.Width - 24.0
+            $window.Top = [double][Windows.SystemParameters]::WorkArea.Bottom - $window.Height - 24.0
+        }
+        if (-not (Test-WindowIntersectsVirtualDesktop $window.Left $window.Top $window.Width $window.Height)) {
+            Move-WindowIntoVirtualDesktop
+        }
+    } finally {
+        $script:restoringWindowPlacement = $false
+    }
+}
+
+function Test-CodexRunning {
+    try { return [QuotaBuddyWindowProbe]::IsCodexRunning() } catch { return $false }
+}
+
 function Sync-WithOfficialPet {
-    if (-not $FollowPet) { return }
+    if (-not $FollowPet) { return $false }
     $pet = Get-OfficialPetState
     $petWindowRect = $null
-    if ($null -ne $pet) {
+    if ($null -ne $pet -and $pet.Open) {
         $petWindowRect = [QuotaBuddyWindowProbe]::FindVisibleCodexWindow([int]$pet.Width, [int]$pet.Height)
     }
     if ($null -eq $pet -or $null -eq $petWindowRect) {
-        if ($window.IsVisible) { $window.Hide() }
-        return
+        return $false
     }
 
-    if (-not $window.IsVisible) { $window.Show() }
     $ratio = [Math]::Max(0.7, [Math]::Min(2.0, $pet.MascotWidth / 80.0))
     if ($script:lastMascotWidth -ne $pet.MascotWidth) {
         $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, 210 * $ratio))
@@ -587,6 +678,26 @@ function Sync-WithOfficialPet {
         $window.Left = $petCenterX - ($window.Width / 2.0)
         $window.Top = $petBottomY
     }
+    Move-WindowIntoVirtualDesktop
+    Save-WindowPlacement
+    return $true
+}
+
+function Update-WindowPresence {
+    if (-not (Test-CodexRunning)) {
+        if ($window.IsVisible) { $window.Hide() }
+        return
+    }
+
+    $followedPet = Sync-WithOfficialPet
+    if (-not $followedPet) {
+        if (-not (Test-WindowIntersectsVirtualDesktop $window.Left $window.Top $window.Width $window.Height)) {
+            Restore-WindowPlacement
+        }
+        Move-WindowIntoVirtualDesktop
+        Save-WindowPlacement
+    }
+    if (-not $window.IsVisible) { $window.Show() }
 }
 
 $menu = New-Object Windows.Controls.ContextMenu
@@ -595,9 +706,14 @@ $exitItem = New-Object Windows.Controls.MenuItem; $exitItem.Header = $strings.Ex
 [void]$menu.Items.Add($refreshItem); [void]$menu.Items.Add($exitItem)
 $refreshItem.Add_Click({ Update-Display }); $exitItem.Add_Click({ $window.Close() })
 $ui.Card.ContextMenu = $menu
-$ui.DragArea.Add_MouseLeftButtonDown({ $window.DragMove() })
-$ui.CompactPanel.Add_MouseLeftButtonDown({ $window.DragMove() })
-$ui.MediumPanel.Add_MouseLeftButtonDown({ $window.DragMove() })
+function Start-QuotaBuddyDrag {
+    try { $window.DragMove() } catch { }
+    Move-WindowIntoVirtualDesktop
+    Save-WindowPlacement
+}
+$ui.DragArea.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
+$ui.CompactPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
+$ui.MediumPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 function Update-ResponsiveLayout {
     if ($script:adjustingResponsiveSize) { return }
     $script:adjustingResponsiveSize = $true
@@ -665,7 +781,8 @@ function Update-ResponsiveLayout {
         $script:adjustingResponsiveSize = $false
     }
 }
-$window.Add_SizeChanged({ Update-ResponsiveLayout })
+$window.Add_SizeChanged({ Update-ResponsiveLayout; Save-WindowPlacement })
+$window.Add_LocationChanged({ Save-WindowPlacement })
 function Switch-QuotaBuddyLanguage([string]$TargetLanguage) {
     if ($TargetLanguage -eq $Language) { return }
     $launcherPath = Join-Path (Split-Path $script:quotaBuddyScriptPath -Parent) 'LaunchQuotaBuddy.vbs'
@@ -708,10 +825,11 @@ $timer.Add_Tick({
         Switch-QuotaBuddyLanguage $requestedLanguage
         return
     }
-    Sync-WithOfficialPet
+    Update-WindowPresence
     if ($window.IsVisible) { Update-Display }
 })
 $timer.Start()
+if (-not $ValidateUI) { Restore-WindowPlacement }
 Update-Display
 if ($ValidateUI) {
     Write-Output 'UI_OK'
@@ -721,6 +839,6 @@ if ($ValidateUI) {
     $window.Close()
     exit
 }
-[void]$window.Add_ContentRendered({ Sync-WithOfficialPet })
-$window.Show()
+[void]$window.Add_ContentRendered({ Update-WindowPresence })
+Update-WindowPresence
 [Windows.Threading.Dispatcher]::Run()
