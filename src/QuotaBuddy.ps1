@@ -1,6 +1,8 @@
 ﻿param(
     [switch]$Once,
     [switch]$ValidateUI,
+    [switch]$SwitchTestWait,
+    [string]$SwitchTestId = '',
     [ValidateSet('zh-CN','en-US')]
     [string]$Language = 'zh-CN',
     [string]$CodexPath = '',
@@ -23,6 +25,7 @@ $script:lastMascotWidth = $null
 $script:globalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $script:quotaBuddyScriptPath = $PSCommandPath
 $script:singleInstanceMutex = $null
+$script:languageSwitchEvents = @{}
 $script:adjustingResponsiveSize = $false
 
 function Read-TailText {
@@ -244,10 +247,12 @@ function Ensure-AutoStart {
         $startupFolder = [Environment]::GetFolderPath('Startup')
         if ([string]::IsNullOrWhiteSpace($startupFolder)) { return }
         $scriptPath = $script:quotaBuddyScriptPath
-        $startupPath = Join-Path $startupFolder 'Quota Buddy.cmd'
-        $launchLine = 'start "Quota Buddy" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}" -Language {1}' -f $scriptPath, $Language
-        $lines = @('@echo off', $launchLine)
-        [IO.File]::WriteAllLines($startupPath, $lines, [Text.Encoding]::ASCII)
+        $oldStartupPath = Join-Path $startupFolder 'Quota Buddy.cmd'
+        $startupPath = Join-Path $startupFolder 'Quota Buddy.vbs'
+        $escapedScriptPath = $scriptPath.Replace('"', '""')
+        $launchLine = 'CreateObject("WScript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""{0}"" -Language {1}", 0, False' -f $escapedScriptPath, $Language
+        [IO.File]::WriteAllLines($startupPath, @($launchLine), [Text.Encoding]::Unicode)
+        if (Test-Path -LiteralPath $oldStartupPath) { Remove-Item -LiteralPath $oldStartupPath -Force }
     } catch { }
 }
 
@@ -279,6 +284,35 @@ function Format-ResetTime([datetime]$Time) {
     return ('今天 {0:HH:mm}' -f $Time)
 }
 
+function Get-LanguageSwitchRequestPath {
+    if ([string]::IsNullOrWhiteSpace($SwitchTestId)) {
+        return (Join-Path $env:USERPROFILE '.codex\quota-buddy-language-switch.txt')
+    }
+    return (Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-language-switch.{0}.txt' -f $SwitchTestId))
+}
+
+function Write-LanguageSwitchRequest([string]$TargetLanguage) {
+    try {
+        $requestPath = Get-LanguageSwitchRequestPath
+        $requestFolder = Split-Path $requestPath -Parent
+        if (-not (Test-Path -LiteralPath $requestFolder)) {
+            [void](New-Item -ItemType Directory -Path $requestFolder -Force)
+        }
+        [IO.File]::WriteAllText($requestPath, $TargetLanguage, [Text.Encoding]::UTF8)
+    } catch { }
+}
+
+function Read-LanguageSwitchRequest {
+    try {
+        $requestPath = Get-LanguageSwitchRequestPath
+        if (-not (Test-Path -LiteralPath $requestPath)) { return $null }
+        $requestedLanguage = [IO.File]::ReadAllText($requestPath, [Text.Encoding]::UTF8).Trim().Trim([char]0xFEFF)
+        Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
+        if ($requestedLanguage -in @('zh-CN', 'en-US')) { return $requestedLanguage }
+    } catch { }
+    return $null
+}
+
 if ($Once) {
     Get-QuotaData -Path $DataFile | ConvertTo-Json -Compress
     Stop-OfficialClient
@@ -286,9 +320,42 @@ if ($Once) {
 }
 
 if (-not $ValidateUI) {
+    $instanceSuffix = if ([string]::IsNullOrWhiteSpace($SwitchTestId)) { '' } else { '.' + $SwitchTestId }
+    $requestPath = Get-LanguageSwitchRequestPath
+    Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
+    foreach ($candidateLanguage in @('zh-CN', 'en-US')) {
+        $eventName = 'Local\QuotaBuddy.Switch.{0}{1}' -f $candidateLanguage, $instanceSuffix
+        $script:languageSwitchEvents[$candidateLanguage] = New-Object Threading.EventWaitHandle($false, [Threading.EventResetMode]::AutoReset, $eventName)
+    }
     $createdNew = $false
-    $script:singleInstanceMutex = New-Object Threading.Mutex($true, 'Local\QuotaBuddy.SingleInstance', [ref]$createdNew)
-    if (-not $createdNew) { exit }
+    $mutexName = 'Local\QuotaBuddy.SingleInstance' + $instanceSuffix
+    $script:singleInstanceMutex = New-Object Threading.Mutex($true, $mutexName, [ref]$createdNew)
+    if (-not $createdNew) {
+        Write-LanguageSwitchRequest $Language
+        [void]$script:languageSwitchEvents[$Language].Set()
+        foreach ($switchEvent in $script:languageSwitchEvents.Values) { $switchEvent.Dispose() }
+        $script:singleInstanceMutex.Dispose()
+        exit
+    }
+    if ($SwitchTestWait) {
+        try {
+            $readyPath = Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-switch-ready.{0}.txt' -f $SwitchTestId)
+            [IO.File]::WriteAllText($readyPath, 'ready', [Text.Encoding]::UTF8)
+        } catch { }
+        $requestedLanguage = $null
+        for ($attempt = 0; $attempt -lt 100 -and $null -eq $requestedLanguage; $attempt++) {
+            foreach ($candidateLanguage in @('zh-CN', 'en-US')) {
+                if ($script:languageSwitchEvents[$candidateLanguage].WaitOne(0)) { $requestedLanguage = $candidateLanguage; break }
+            }
+            if ($null -eq $requestedLanguage) { $requestedLanguage = Read-LanguageSwitchRequest }
+            if ($null -eq $requestedLanguage) { Start-Sleep -Milliseconds 50 }
+        }
+        if ($null -ne $requestedLanguage) { Write-Output ('SWITCH=' + $requestedLanguage) }
+        foreach ($switchEvent in $script:languageSwitchEvents.Values) { $switchEvent.Dispose() }
+        $script:singleInstanceMutex.ReleaseMutex(); $script:singleInstanceMutex.Dispose()
+        if ($null -eq $requestedLanguage) { exit 1 }
+        exit
+    }
     Ensure-AutoStart
 }
 
@@ -599,17 +666,48 @@ function Update-ResponsiveLayout {
     }
 }
 $window.Add_SizeChanged({ Update-ResponsiveLayout })
+function Switch-QuotaBuddyLanguage([string]$TargetLanguage) {
+    if ($TargetLanguage -eq $Language) { return }
+    $launcherPath = Join-Path (Split-Path $script:quotaBuddyScriptPath -Parent) 'LaunchQuotaBuddy.vbs'
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Join-Path ([Environment]::GetFolderPath('System')) 'wscript.exe'
+    $startInfo.Arguments = '"{0}" {1} --delay' -f $launcherPath, $TargetLanguage
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $switchProcess = [Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $switchProcess) { return }
+    $switchProcess.Dispose()
+    if ($null -ne $script:singleInstanceMutex) {
+        try { $script:singleInstanceMutex.ReleaseMutex() } catch { }
+        try { $script:singleInstanceMutex.Dispose() } catch { }
+        $script:singleInstanceMutex = $null
+    }
+    $window.Close()
+}
 $window.Add_Closed({
     Stop-OfficialClient
     if ($null -ne $script:singleInstanceMutex) {
         try { $script:singleInstanceMutex.ReleaseMutex() } catch { }
         try { $script:singleInstanceMutex.Dispose() } catch { }
     }
+    foreach ($switchEvent in $script:languageSwitchEvents.Values) { try { $switchEvent.Dispose() } catch { } }
     [Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
 })
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(500)
 $timer.Add_Tick({
+    $requestedLanguage = $null
+    foreach ($candidateLanguage in @('zh-CN', 'en-US')) {
+        if ($script:languageSwitchEvents.ContainsKey($candidateLanguage) -and $script:languageSwitchEvents[$candidateLanguage].WaitOne(0)) {
+            $requestedLanguage = $candidateLanguage
+            break
+        }
+    }
+    if ($null -eq $requestedLanguage) { $requestedLanguage = Read-LanguageSwitchRequest }
+    if ($null -ne $requestedLanguage) {
+        Switch-QuotaBuddyLanguage $requestedLanguage
+        return
+    }
     Sync-WithOfficialPet
     if ($window.IsVisible) { Update-Display }
 })
