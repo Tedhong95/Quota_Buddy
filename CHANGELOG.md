@@ -1,6 +1,11 @@
 # Changelog
 
-## 2026-07-13
+## v0.2.1 - 2026-07-13
+
+- Fixed pet alignment on computers using non-100% display scaling by using the desktop coordinates directly.
+- Changed the no-pet default position to the lower-right corner of the primary screen without saving pet-following coordinates as a normal placement.
+
+## v0.2.0 - 2026-07-13
 
 - Updated the interface for the latest GPT quota rules by removing the discontinued 5-hour quota.
 - Added the type and expiration date for every available reset credit.

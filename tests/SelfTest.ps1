@@ -3,9 +3,14 @@ $root = Split-Path $PSScriptRoot -Parent
 $app = Join-Path $root 'src\QuotaBuddy.ps1'
 $launcher = Join-Path $root 'src\LaunchQuotaBuddy.vbs'
 $sample = Join-Path $env:TEMP ("quota-buddy-test-$([guid]::NewGuid().ToString('N')).log")
+$petSample = Join-Path $env:TEMP ("quota-buddy-pet-test-$([guid]::NewGuid().ToString('N')).json")
 $fixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":23,"window_minutes":300,"reset_after_seconds":5000,"reset_at":1893456000},"secondary":{"used_percent":41,"window_minutes":10080,"reset_after_seconds":90000,"reset_at":1893542400}}' + [Environment]::NewLine + '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
 [IO.File]::WriteAllText($sample, $fixture, [Text.Encoding]::UTF8)
 try {
+    $petFixture = '{"electron-avatar-overlay-open":true,"electron-avatar-overlay-bounds":{"x":100,"y":200,"width":300,"height":260,"mascot":{"left":20,"top":30,"width":80,"height":90}}}'
+    [IO.File]::WriteAllText($petSample, $petFixture, [Text.Encoding]::UTF8)
+    $petResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -ValidatePositioning -PetStateFile $petSample -ValidatePanelWidth 160) | ConvertFrom-Json
+    if (-not $petResult.Available -or -not $petResult.Open -or $petResult.Left -ne 80 -or $petResult.Top -ne 324) { throw '宠物正下方定位计算错误' }
     $launchProbe = & cscript.exe //NoLogo $launcher zh-CN --probe
     if ($LASTEXITCODE -ne 0 -or $launchProbe -notmatch 'QuotaBuddy\.ps1" -Language zh-CN$') { throw '无窗口启动器未能正确建立启动命令' }
     foreach ($switchCase in @(@('zh-CN', 'en-US'), @('en-US', 'zh-CN'))) {
@@ -94,4 +99,5 @@ try {
     Write-Host 'Quota Buddy 自检：全部通过 / All tests passed' -ForegroundColor Green
 } finally {
     Remove-Item -LiteralPath $sample -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $petSample -Force -ErrorAction SilentlyContinue
 }

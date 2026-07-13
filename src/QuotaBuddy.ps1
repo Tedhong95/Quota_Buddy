@@ -2,6 +2,9 @@
     [switch]$Once,
     [switch]$ValidateUI,
     [double]$ValidateWidth = 0,
+    [switch]$ValidatePositioning,
+    [string]$PetStateFile = '',
+    [double]$ValidatePanelWidth = 160,
     [switch]$SwitchTestWait,
     [string]$SwitchTestId = '',
     [ValidateSet('zh-CN','en-US')]
@@ -27,6 +30,7 @@ $script:usagePanelQuotaValue = $null
 $script:defaultDataFile = Join-Path $env:USERPROFILE '.codex\logs_2.sqlite'
 $script:lastMascotWidth = $null
 $script:globalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
+if (-not [string]::IsNullOrWhiteSpace($PetStateFile)) { $script:globalStatePath = $PetStateFile }
 $script:windowPlacementPath = Join-Path $env:USERPROFILE '.codex\quota-buddy-window.json'
 $script:diagnosticLogPath = Join-Path $env:USERPROFILE '.codex\quota-buddy.log'
 $script:quotaBuddyScriptPath = $PSCommandPath
@@ -38,6 +42,9 @@ $script:lastDisplayRefresh = [datetime]::MinValue
 $script:creditDetailLineCount = 1
 $script:targetContentHeight = 118.0
 $script:wideCreditLines = @()
+$script:positioningForPet = $false
+$script:wasFollowingPet = $false
+$script:noPetPositionInitialized = $false
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -315,7 +322,7 @@ function Start-OfficialClient {
     if (-not $started -or $null -eq $process) { throw 'Unable to start Codex quota service' }
     $script:officialProcess = $process
 
-    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.2.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
+    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.2.1' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
     $process.StandardInput.WriteLine($initialize)
     $process.StandardInput.Flush()
     $initialized = $false
@@ -497,18 +504,29 @@ function Ensure-AutoStart {
 function Get-OfficialPetState {
     try {
         $text = [IO.File]::ReadAllText($script:globalStatePath, [Text.Encoding]::UTF8)
-        $openMatch = [regex]::Match($text, '"electron-avatar-overlay-open":(?<open>true|false)', 'IgnoreCase')
-        $boundsPattern = '"electron-avatar-overlay-bounds":\{"x":(?<x>-?\d+),"y":(?<y>-?\d+),"width":(?<w>\d+),"height":(?<h>\d+).*?"mascot":\{"left":(?<ml>-?\d+),"top":(?<mt>-?\d+),"width":(?<mw>\d+),"height":(?<mh>\d+)'
-        $bounds = [regex]::Match($text, $boundsPattern, 'Singleline')
-        if (-not $openMatch.Success -or -not $bounds.Success) { return $null }
-        return [pscustomobject]@{
-            Open = ($openMatch.Groups['open'].Value -eq 'true')
-            X = [double]$bounds.Groups['x'].Value; Y = [double]$bounds.Groups['y'].Value
-            Width = [double]$bounds.Groups['w'].Value; Height = [double]$bounds.Groups['h'].Value
-            MascotLeft = [double]$bounds.Groups['ml'].Value; MascotTop = [double]$bounds.Groups['mt'].Value
-            MascotWidth = [double]$bounds.Groups['mw'].Value; MascotHeight = [double]$bounds.Groups['mh'].Value
+        $state = $text | ConvertFrom-Json
+        $petState = $state
+        if ($null -eq $state.PSObject.Properties['electron-avatar-overlay-bounds']) {
+            $persistedProperty = $state.PSObject.Properties['electron-persisted-atom-state']
+            if ($null -ne $persistedProperty -and $null -ne $persistedProperty.Value) { $petState = $persistedProperty.Value }
         }
-    } catch { return $null }
+        $openProperty = $petState.PSObject.Properties['electron-avatar-overlay-open']
+        $boundsProperty = $petState.PSObject.Properties['electron-avatar-overlay-bounds']
+        if ($null -eq $openProperty -or $null -eq $boundsProperty -or $null -eq $boundsProperty.Value) { return $null }
+        $bounds = $boundsProperty.Value
+        $mascot = $bounds.mascot
+        if ($null -eq $mascot) { return $null }
+        return [pscustomobject]@{
+            Open = [bool]$openProperty.Value
+            X = [double]$bounds.x; Y = [double]$bounds.y
+            Width = [double]$bounds.width; Height = [double]$bounds.height
+            MascotLeft = [double]$mascot.left; MascotTop = [double]$mascot.top
+            MascotWidth = [double]$mascot.width; MascotHeight = [double]$mascot.height
+        }
+    } catch {
+        Write-DiagnosticLog ('Pet state read failed: ' + $_.Exception.Message)
+        return $null
+    }
 }
 
 function Format-ResetTime([datetime]$Time) {
@@ -549,6 +567,18 @@ function Read-LanguageSwitchRequest {
         if ($requestedLanguage -in @('zh-CN', 'en-US')) { return $requestedLanguage }
     } catch { }
     return $null
+}
+
+if ($ValidatePositioning) {
+    $pet = Get-OfficialPetState
+    if ($null -eq $pet) { Write-Output '{"Available":false}'; exit 1 }
+    [pscustomobject]@{
+        Available = $true
+        Open = $pet.Open
+        Left = $pet.X + $pet.MascotLeft + ($pet.MascotWidth / 2.0) - ($ValidatePanelWidth / 2.0)
+        Top = $pet.Y + $pet.MascotTop + $pet.MascotHeight + 4.0
+    } | ConvertTo-Json -Compress
+    exit
 }
 
 if ($Once) {
@@ -863,6 +893,7 @@ function Move-WindowIntoVirtualDesktop {
 function Save-WindowPlacement {
     if ($ValidateUI) { return }
     if ($script:restoringWindowPlacement) { return }
+    if ($script:positioningForPet) { return }
     if (-not (Test-WindowIntersectsVirtualDesktop $window.Left $window.Top $window.Width $window.Height)) { return }
     try {
         $folder = Split-Path $script:windowPlacementPath -Parent
@@ -913,6 +944,14 @@ function Restore-WindowPlacement {
     }
 }
 
+function Move-ToDefaultNoPetPosition {
+    $workArea = [Windows.SystemParameters]::WorkArea
+    $margin = 16.0
+    $window.Left = [double]$workArea.Right - $window.Width - $margin
+    $window.Top = [double]$workArea.Bottom - $window.Height - $margin
+    Move-WindowIntoVirtualDesktop
+}
+
 function Test-CodexRunning {
     try { return [QuotaBuddyWindowProbe]::IsCodexRunning() } catch { return $false }
 }
@@ -928,19 +967,17 @@ function Sync-WithOfficialPet {
     # 宠物只决定面板位置，绝不覆盖用户手动设置的尺寸。
     $script:lastMascotWidth = $pet.MascotWidth
 
+    # Electron 保存的是与 WPF 一致的桌面逻辑坐标，不应再次按 DPI 缩放转换。
     $petCenterX = $pet.X + $pet.MascotLeft + ($pet.MascotWidth / 2.0)
     $petBottomY = $pet.Y + $pet.MascotTop + $pet.MascotHeight + 4.0
-    $source = [Windows.PresentationSource]::FromVisual($window)
-    if ($null -ne $source -and $null -ne $source.CompositionTarget) {
-        $point = $source.CompositionTarget.TransformFromDevice.Transform([Windows.Point]::new($petCenterX, $petBottomY))
-        $window.Left = $point.X - ($window.Width / 2.0)
-        $window.Top = $point.Y
-    } else {
+    $script:positioningForPet = $true
+    try {
         $window.Left = $petCenterX - ($window.Width / 2.0)
         $window.Top = $petBottomY
+        Move-WindowIntoVirtualDesktop
+    } finally {
+        $script:positioningForPet = $false
     }
-    Move-WindowIntoVirtualDesktop
-    Save-WindowPlacement
     return $true
 }
 
@@ -951,10 +988,15 @@ function Update-WindowPresence {
     }
 
     $followedPet = Sync-WithOfficialPet
-    if (-not $followedPet) {
-        if (-not (Test-WindowIntersectsVirtualDesktop $window.Left $window.Top $window.Width $window.Height)) {
-            Restore-WindowPlacement
+    if ($followedPet) {
+        $script:wasFollowingPet = $true
+        $script:noPetPositionInitialized = $false
+    } else {
+        if ($script:wasFollowingPet -or -not $script:noPetPositionInitialized) {
+            Move-ToDefaultNoPetPosition
+            $script:noPetPositionInitialized = $true
         }
+        $script:wasFollowingPet = $false
         Move-WindowIntoVirtualDesktop
         Save-WindowPlacement
     }
