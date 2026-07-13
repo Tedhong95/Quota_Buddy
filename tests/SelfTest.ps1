@@ -3,7 +3,7 @@ $root = Split-Path $PSScriptRoot -Parent
 $app = Join-Path $root 'src\QuotaBuddy.ps1'
 $launcher = Join-Path $root 'src\LaunchQuotaBuddy.vbs'
 $sample = Join-Path $env:TEMP ("quota-buddy-test-$([guid]::NewGuid().ToString('N')).log")
-$fixture = 'websocket event: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":23,"window_minutes":300,"reset_after_seconds":5000,"reset_at":1893456000},"secondary":{"used_percent":41,"window_minutes":10080,"reset_after_seconds":90000,"reset_at":1893542400}}}' + [Environment]::NewLine + 'websocket event: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}}'
+$fixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":23,"window_minutes":300,"reset_after_seconds":5000,"reset_at":1893456000},"secondary":{"used_percent":41,"window_minutes":10080,"reset_after_seconds":90000,"reset_at":1893542400}}' + [Environment]::NewLine + '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
 [IO.File]::WriteAllText($sample, $fixture, [Text.Encoding]::UTF8)
 try {
     $launchProbe = & cscript.exe //NoLogo $launcher zh-CN --probe
@@ -57,23 +57,40 @@ try {
     if (-not $result.Available) { throw '样例数据未被识别' }
     if ($result.PrimaryRemaining -ne 75) { throw '5 小时额度计算错误' }
     if ($result.SecondaryRemaining -ne 58) { throw '每周额度计算错误' }
+    $camelPrimaryReset = [DateTimeOffset]::Now.AddHours(2).ToUnixTimeSeconds()
+    $camelSecondaryReset = [DateTimeOffset]::Now.AddDays(2).ToUnixTimeSeconds()
+    $camelFixture = '{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":63,"windowDurationMins":300,"resetsAt":' + $camelPrimaryReset + '},"secondary":{"usedPercent":41,"windowDurationMins":10080,"resetsAt":' + $camelSecondaryReset + '}}}}'
+    [IO.File]::WriteAllText($sample, $camelFixture, [Text.Encoding]::UTF8)
+    $camelResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -Once -DataFile $sample) | ConvertFrom-Json
+    if (-not $camelResult.Available -or $camelResult.PrimaryRemaining -ne 37 -or $camelResult.SecondaryRemaining -ne 59) { throw '新版 Codex camelCase 额度格式识别错误' }
+    $pollutedFixture = 'tool exec call: $fixture = ''websocket event: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}}'''
+    [IO.File]::WriteAllText($sample, $pollutedFixture, [Text.Encoding]::UTF8)
+    $pollutedResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -Once -DataFile $sample) | ConvertFrom-Json
+    if ($pollutedResult.Available) { throw '污染日志被错误识别为真实额度' }
     $missing = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -Once -DataFile ($sample + '.missing')) | ConvertFrom-Json
     if ($missing.Available) { throw '缺少数据时没有正确提示' }
+    $greenPrimaryReset = [DateTimeOffset]::Now.AddHours(2).ToUnixTimeSeconds()
+    $greenSecondaryReset = [DateTimeOffset]::Now.AddDays(2).ToUnixTimeSeconds()
+    $greenFixture = '{"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":25,"windowDurationMins":300,"resetsAt":' + $greenPrimaryReset + '},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":' + $greenSecondaryReset + '}}}}'
+    [IO.File]::WriteAllText($sample, $greenFixture, [Text.Encoding]::UTF8)
     $uiZh = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
     $uiEn = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language en-US -DataFile $sample
     if ($uiZh -notcontains 'UI_OK' -or $uiEn -notcontains 'UI_OK') { throw '中英文悬浮窗口未能正确建立' }
-    if (-not ($uiZh -match 'SECONDARY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
-    if (-not ($uiEn -match 'SECONDARY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'SECONDARY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
+    if (-not ($uiZh -match 'WEEKLY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
+    if (-not ($uiEn -match 'WEEKLY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'WEEKLY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
+    if ($uiZh -match '5小时' -or $uiEn -match '5 hours') { throw '界面仍显示已取消的 5 小时额度' }
     if (-not ($uiZh -match 'COLOR=#FF34C759')) { throw '充足额度未显示绿色状态灯' }
-    $secondaryLowFixture = 'websocket event: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}}'
+    if (-not ($uiZh -match 'WEEKLY_COLOR=#FF34C759') -or -not ($uiZh -match 'WEEKLY_BAR_COLOR=#FF34C759')) { throw '每周额度文字或进度条未与呼吸灯保持同色' }
+    $secondaryLowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
     [IO.File]::WriteAllText($sample, $secondaryLowFixture, [Text.Encoding]::UTF8)
     $uiSecondaryLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
-    if (-not ($uiSecondaryLow -match 'COLOR=#FF34C759')) { throw '状态灯错误地使用了每周额度' }
+    if (-not ($uiSecondaryLow -match 'COLOR=#FFB91C1C')) { throw '每周额度极低时状态灯未正确变色' }
+    if (-not ($uiSecondaryLow -match 'WEEKLY_COLOR=#FFB91C1C') -or -not ($uiSecondaryLow -match 'WEEKLY_BAR_COLOR=#FFB91C1C')) { throw '极低额度时文字、进度条和呼吸灯颜色不一致' }
     if (-not ($uiZh -match 'RESET_WEIGHT=SemiBold') -or -not ($uiEn -match 'RESET_WEIGHT=SemiBold')) { throw '宽屏重置次数未保持半粗体' }
-    $lowFixture = 'websocket event: {"type":"codex.rate_limits","rate_limits":{"primary":{"used_percent":85,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}}'
+    $lowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":85,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
     [IO.File]::WriteAllText($sample, $lowFixture, [Text.Encoding]::UTF8)
     $uiLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
-    if (-not ($uiLow -match 'COLOR=#FFFF3B30')) { throw '低额度未切换为红色状态灯' }
+    if (-not ($uiLow -match 'COLOR=#FF34C759')) { throw '状态灯错误地使用了已取消的 5 小时额度' }
     Write-Host 'Quota Buddy 自检：全部通过 / All tests passed' -ForegroundColor Green
 } finally {
     Remove-Item -LiteralPath $sample -Force -ErrorAction SilentlyContinue
