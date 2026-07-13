@@ -13,7 +13,7 @@ Supports Windows 10/11 and requires the latest signed-in GPT/Codex desktop clien
 3. Double-click `Start Quota Buddy-English.cmd`.
 4. Drag the title area to move the panel, or drag the right edge or lower-right corner to change its width. After resizing stops, the height automatically tightens to fit all content without blank space. Right-click to refresh or exit.
 
-The first run adds a Windows sign-in startup entry. The panel follows the pet while it is open and stays at its last usable position when no pet is available.
+The first run adds a Windows sign-in startup entry. The panel stays directly below and follows the pet while it is open; when no pet is available, it defaults to the lower-right corner of the primary screen.
 
 ## Features
 
