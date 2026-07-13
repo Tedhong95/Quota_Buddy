@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$Once,
     [switch]$ValidateUI,
+    [double]$ValidateWidth = 0,
     [switch]$SwitchTestWait,
     [string]$SwitchTestId = '',
     [ValidateSet('zh-CN','en-US')]
@@ -19,16 +20,24 @@ $script:lastVisualState = $null
 $script:officialProcess = $null
 $script:officialRequestId = 10
 $script:officialQuotaValue = $null
+$script:officialExecutableCopy = $null
 $script:lastOfficialPoll = [datetime]::MinValue
+$script:lastUsagePanelPoll = [datetime]::MinValue
+$script:usagePanelQuotaValue = $null
 $script:defaultDataFile = Join-Path $env:USERPROFILE '.codex\logs_2.sqlite'
 $script:lastMascotWidth = $null
 $script:globalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 $script:windowPlacementPath = Join-Path $env:USERPROFILE '.codex\quota-buddy-window.json'
+$script:diagnosticLogPath = Join-Path $env:USERPROFILE '.codex\quota-buddy.log'
 $script:quotaBuddyScriptPath = $PSCommandPath
 $script:singleInstanceMutex = $null
 $script:languageSwitchEvents = @{}
 $script:adjustingResponsiveSize = $false
 $script:restoringWindowPlacement = $false
+$script:lastDisplayRefresh = [datetime]::MinValue
+$script:creditDetailLineCount = 1
+$script:targetContentHeight = 118.0
+$script:wideCreditLines = @()
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -44,21 +53,64 @@ function Read-TailText {
     } finally { $stream.Dispose() }
 }
 
+function Write-DiagnosticLog {
+    param([string]$Message)
+    try {
+        $folder = Split-Path $script:diagnosticLogPath -Parent
+        if (-not (Test-Path -LiteralPath $folder)) {
+            [void](New-Item -ItemType Directory -Path $folder -Force)
+        }
+        $line = '{0} {1}' -f ([datetime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
+        [IO.File]::AppendAllText($script:diagnosticLogPath, $line + [Environment]::NewLine, [Text.Encoding]::UTF8)
+    } catch { }
+}
+
+trap {
+    try { Write-DiagnosticLog ('Fatal error: ' + $_.Exception.Message) } catch { }
+    exit 1
+}
+
+function Test-QuotaTimeRange {
+    param(
+        [datetime]$PrimaryResetAt,
+        [datetime]$SecondaryResetAt,
+        [datetime]$ObservedAt
+    )
+    if ($ObservedAt -eq [datetime]::MinValue) { $ObservedAt = [datetime]::Now }
+    $primarySpan = $PrimaryResetAt - $ObservedAt
+    $secondarySpan = $SecondaryResetAt - $ObservedAt
+    if ($primarySpan.TotalMinutes -lt -15 -or $primarySpan.TotalHours -gt 6) { return $false }
+    if ($secondarySpan.TotalMinutes -lt -15 -or $secondarySpan.TotalDays -gt 8) { return $false }
+    return $true
+}
+
 function Convert-RateLimitMatch {
-    param([System.Text.RegularExpressions.Match]$Match)
+    param(
+        [System.Text.RegularExpressions.Match]$Match,
+        [datetime]$ObservedAt = [datetime]::MinValue
+    )
     $pUsed = [int]$Match.Groups['pu'].Value
     $sUsed = [int]$Match.Groups['su'].Value
     $primaryReset = [long]$Match.Groups['pr'].Value
     $secondaryReset = [long]$Match.Groups['sr'].Value
-    $primaryAfter = [long]$Match.Groups['pa'].Value
-    $secondaryAfter = [long]$Match.Groups['sa'].Value
+    $primaryAfter = if ($Match.Groups['pa'].Success) { [long]$Match.Groups['pa'].Value } else { 0 }
+    $secondaryAfter = if ($Match.Groups['sa'].Success) { [long]$Match.Groups['sa'].Value } else { 0 }
+    if ($ObservedAt -eq [datetime]::MinValue) {
+        $observedUnix = [Math]::Max($primaryReset - $primaryAfter, $secondaryReset - $secondaryAfter)
+        $ObservedAt = [DateTimeOffset]::FromUnixTimeSeconds($observedUnix).LocalDateTime
+    }
+    $primaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds($primaryReset).LocalDateTime
+    $secondaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds($secondaryReset).LocalDateTime
+    if (-not (Test-QuotaTimeRange -PrimaryResetAt $primaryResetAt -SecondaryResetAt $secondaryResetAt -ObservedAt $ObservedAt)) {
+        return $null
+    }
     [pscustomobject]@{
         Available = $true
         PrimaryRemaining = [Math]::Max(0, 100 - $pUsed)
         SecondaryRemaining = [Math]::Max(0, 100 - $sUsed)
-        PrimaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds($primaryReset).LocalDateTime
-        SecondaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds($secondaryReset).LocalDateTime
-        ObservedAt = [DateTimeOffset]::FromUnixTimeSeconds([Math]::Max($primaryReset - $primaryAfter, $secondaryReset - $secondaryAfter)).LocalDateTime
+        PrimaryResetAt = $primaryResetAt
+        SecondaryResetAt = $secondaryResetAt
+        ObservedAt = $ObservedAt
         Source = 'Codex 本地运行记录'
         Message = ''
     }
@@ -91,30 +143,64 @@ function Get-LogQuotaData {
             return $script:quotaCacheValue
         }
         if (@($stampParts).Count -eq 0) { throw '未找到 Codex 本地运行记录' }
-        $jsonPattern = '"primary"\s*:\s*\{[^{}]*?"used_percent"\s*:\s*(?<pu>\d+)[^{}]*?"reset_after_seconds"\s*:\s*(?<pa>\d+)[^{}]*?"reset_at"\s*:\s*(?<pr>\d+)[^{}]*?\}\s*,\s*"secondary"\s*:\s*\{[^{}]*?"used_percent"\s*:\s*(?<su>\d+)[^{}]*?"reset_after_seconds"\s*:\s*(?<sa>\d+)[^{}]*?"reset_at"\s*:\s*(?<sr>\d+)'
+        $isDefaultSource = ([IO.Path]::GetFullPath($Path) -eq [IO.Path]::GetFullPath($script:defaultDataFile))
+        $jsonPattern = '"rate_limits"\s*:\s*\{[^{}]*?"primary"\s*:\s*\{[^{}]*?"used_percent"\s*:\s*(?<pu>\d+)[^{}]*?"reset_after_seconds"\s*:\s*(?<pa>\d+)[^{}]*?"reset_at"\s*:\s*(?<pr>\d+)[^{}]*?\}\s*,\s*"secondary"\s*:\s*\{[^{}]*?"used_percent"\s*:\s*(?<su>\d+)[^{}]*?"reset_after_seconds"\s*:\s*(?<sa>\d+)[^{}]*?"reset_at"\s*:\s*(?<sr>\d+)'
+        # 新版 Codex 的 rateLimits 使用 camelCase，且不再写入 reset_after_seconds。
+        $camelJsonPattern = '"rateLimits"\s*:\s*\{[^{}]*?"primary"\s*:\s*\{[^{}]*?"usedPercent"\s*:\s*(?<pu>\d+)[^{}]*?"resetsAt"\s*:\s*(?<pr>\d+)[^{}]*?\}\s*,\s*"secondary"\s*:\s*\{[^{}]*?"usedPercent"\s*:\s*(?<su>\d+)[^{}]*?"resetsAt"\s*:\s*(?<sr>\d+)'
+        $camelByIdPattern = '"rateLimitsByLimitId"\s*:\s*\{[^{}]*?"codex"\s*:\s*\{[^{}]*?"primary"\s*:\s*\{[^{}]*?"usedPercent"\s*:\s*(?<pu>\d+)[^{}]*?"resetsAt"\s*:\s*(?<pr>\d+)[^{}]*?\}\s*,\s*"secondary"\s*:\s*\{[^{}]*?"usedPercent"\s*:\s*(?<su>\d+)[^{}]*?"resetsAt"\s*:\s*(?<sr>\d+)'
         $headerPattern = 'x-codex-primary-used-percent"\s*:\s*"(?<pu>\d+)".*?x-codex-secondary-used-percent"\s*:\s*"(?<su>\d+)".*?x-codex-primary-reset-after-seconds"\s*:\s*"(?<pa>\d+)".*?x-codex-secondary-reset-after-seconds"\s*:\s*"(?<sa>\d+)".*?x-codex-primary-reset-at"\s*:\s*"(?<pr>\d+)".*?x-codex-secondary-reset-at"\s*:\s*"(?<sr>\d+)"'
-        # WAL 保存 Codex 当前会话刚写入的数据，优先级与官方窗口最接近；主库仅作回退。
+        # WAL 和主库都可能包含最近记录，统一收集后再按记录新旧程度选择。
+        $allResults = @()
         foreach ($candidatePath in @(($Path + '-wal'), $Path)) {
             $readBytes = if ($candidatePath.EndsWith('-wal')) { 8388608 } else { 134217728 }
             $text = Read-TailText -Path $candidatePath -MaxBytes $readBytes
             if ([string]::IsNullOrEmpty($text)) { continue }
+            # SQLite 中的事件正文有时以转义 JSON 字符串保存，先还原引号和换行。
+            $text = $text -replace '\\+"', '"' -replace '\\r\\n', ' ' -replace '\\n', ' '
             $results = @()
-            $matches = [regex]::Matches($text, $jsonPattern, 'IgnoreCase,Singleline')
-            if ($matches.Count -eq 0) {
-                $matches = [regex]::Matches($text, $headerPattern, 'IgnoreCase,Singleline')
-            }
-            foreach ($match in $matches) {
-                $results += Convert-RateLimitMatch $match
+            $fileObservedAt = (Get-Item -LiteralPath $candidatePath).LastWriteTime
+            $patternGroups = @(
+                @{ Pattern = $jsonPattern; ObservedAt = [datetime]::MinValue; RequireRealLog = $true },
+                @{ Pattern = $camelByIdPattern; ObservedAt = $fileObservedAt; RequireRealLog = $false },
+                @{ Pattern = $camelJsonPattern; ObservedAt = $fileObservedAt; RequireRealLog = $false },
+                @{ Pattern = $headerPattern; ObservedAt = [datetime]::MinValue; RequireRealLog = $false }
+            )
+            foreach ($patternGroup in $patternGroups) {
+                $matches = [regex]::Matches($text, $patternGroup.Pattern, 'IgnoreCase,Singleline')
+                foreach ($match in $matches) {
+                    $contextStart = [Math]::Max(0, $match.Index - 300)
+                    $contextLength = [Math]::Min($text.Length - $contextStart, $match.Length + 600)
+                    $context = $text.Substring($contextStart, $contextLength)
+                    if ($context -match 'websocket event:' -or $context -match 'SelfTest\.ps1' -or $context -match 'quota-buddy-test-' -or $context -match 'tool exec call') { continue }
+                    if ($patternGroup.RequireRealLog -and $context -notmatch '"codex\.rate_limits"\s*,\s*"plan_type"') { continue }
+                    $observed = $patternGroup.ObservedAt
+                    if ($observed -ne [datetime]::MinValue) {
+                        # 同一文件中的新版记录没有单独的观察时间，用文件内位置保持追加顺序。
+                        $observed = $observed.AddTicks([long]$match.Index)
+                    }
+                    $converted = Convert-RateLimitMatch $match -ObservedAt $observed
+                    if ($null -ne $converted) {
+                        if ($isDefaultSource -and ($converted.ObservedAt -gt ([datetime]::Now).AddDays(1) -or $converted.ObservedAt -lt ([datetime]::Now).AddDays(-30))) {
+                            continue
+                        }
+                        $results += $converted
+                    }
+                }
             }
             if ($results.Count -eq 0) {
-                # WAL 经常包含普通运行信息。若其中没有新额度，继续使用上次可靠值，避免反复扫描主库。
-                if ($candidatePath.EndsWith('-wal') -and $script:quotaCachePath -eq $Path -and $null -ne $script:quotaCacheValue) {
-                    $script:quotaCacheStamp = $stamp
-                    return $script:quotaCacheValue
-                }
                 continue
             }
-            $selected = $results | Sort-Object `
+            $allResults += $results
+        }
+        if ($allResults.Count -gt 0) {
+            $now = [datetime]::Now
+            $currentResults = @($allResults | Where-Object {
+                $_.PrimaryResetAt -gt $now -and $_.SecondaryResetAt -gt $now -and
+                (Test-QuotaTimeRange -PrimaryResetAt $_.PrimaryResetAt -SecondaryResetAt $_.SecondaryResetAt -ObservedAt $_.ObservedAt)
+            })
+            if ($currentResults.Count -eq 0) { throw '本地额度记录已过期或不可信；请在 Codex 中刷新额度后再试' }
+            $allResults = $currentResults
+            $selected = $allResults | Sort-Object `
                 @{ Expression = 'ObservedAt'; Descending = $true }, `
                 @{ Expression = 'SecondaryResetAt'; Descending = $true }, `
                 @{ Expression = 'PrimaryResetAt'; Descending = $true }, `
@@ -140,32 +226,101 @@ function Read-OfficialLine {
     return $task.Result
 }
 
+function Convert-CodexResetTime {
+    param($Value)
+    if ($null -eq $Value) { throw 'Codex quota response did not include a reset time' }
+    if ($Value -is [datetime]) { return $Value.ToLocalTime() }
+    $text = [string]$Value
+    $seconds = 0L
+    if ([long]::TryParse($text, [ref]$seconds)) {
+        return [DateTimeOffset]::FromUnixTimeSeconds($seconds).LocalDateTime
+    }
+    return ([datetimeoffset]::Parse($text)).LocalDateTime
+}
+
+function Get-CodexRateLimitObject {
+    param($Result)
+    if ($null -eq $Result) { return $null }
+    if ($null -ne $Result.PSObject.Properties['rateLimits']) {
+        return $Result.rateLimits
+    }
+    if ($null -ne $Result.PSObject.Properties['rateLimitsByLimitId']) {
+        $byId = $Result.rateLimitsByLimitId
+        if ($null -ne $byId.PSObject.Properties['codex']) { return $byId.codex }
+        foreach ($property in $byId.PSObject.Properties) {
+            if ($null -ne $property.Value.primary -and $null -ne $property.Value.secondary) { return $property.Value }
+        }
+    }
+    return $null
+}
+
+function Find-CodexExecutable {
+    function Get-LaunchableCodexPath([string]$Path) {
+        if ($Path -notlike '*\WindowsApps\*') { return $Path }
+        $copyPath = Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-codex-{0}.exe' -f $PID)
+        Copy-Item -LiteralPath $Path -Destination $copyPath -Force
+        $script:officialExecutableCopy = $copyPath
+        return $copyPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CodexPath) -and (Test-Path -LiteralPath $CodexPath)) { return $CodexPath }
+    foreach ($name in @('codex.exe', 'codex')) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace($command.Source)) { return Get-LaunchableCodexPath $command.Source }
+    }
+    $running = Get-Process -Name codex -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $running -and -not [string]::IsNullOrWhiteSpace($running.Path) -and (Test-Path -LiteralPath $running.Path)) {
+        # Windows Store 应用目录中的程序不能由普通桌面进程直接启动，复制到临时目录后再使用。
+        return Get-LaunchableCodexPath $running.Path
+    }
+    try {
+        $package = Get-AppxPackage -Name 'OpenAI.Codex*' -ErrorAction Stop | Select-Object -First 1
+        $candidate = Join-Path $package.InstallLocation 'app\resources\codex.exe'
+        if (Test-Path -LiteralPath $candidate) { return Get-LaunchableCodexPath $candidate }
+    } catch { }
+    throw '未找到 ChatGPT/Codex 桌面端程序'
+}
+
 function Start-OfficialClient {
     if ($null -ne $script:officialProcess -and -not $script:officialProcess.HasExited) { return }
-    $exe = $CodexPath
-    if ([string]::IsNullOrWhiteSpace($exe)) {
-        $command = Get-Command codex -ErrorAction Stop
-        $exe = $command.Source
+    $exe = Find-CodexExecutable
+    $launchers = @()
+    $launchers += @{ FileName = $exe; Arguments = 'app-server' }
+    if ([string]::IsNullOrWhiteSpace($CodexPath)) {
+        $launchers += @{ FileName = (Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'); Arguments = '/d /c codex app-server' }
     }
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    $psi.Arguments = 'app-server'
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $psi
-    if (-not $process.Start()) { throw 'Unable to start Codex quota service' }
+
+    $process = $null
+    $started = $false
+    foreach ($launcher in $launchers) {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $launcher.FileName
+        $psi.Arguments = $launcher.Arguments
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $psi
+        try {
+            $started = $process.Start()
+            if ($started) { break }
+        } catch {
+            Write-DiagnosticLog ('Official quota service launch failed: ' + $_.Exception.Message)
+            try { $process.Dispose() } catch { }
+            $process = $null
+            $started = $false
+        }
+    }
+    if (-not $started -or $null -eq $process) { throw 'Unable to start Codex quota service' }
     $script:officialProcess = $process
 
     $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.2.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
     $process.StandardInput.WriteLine($initialize)
     $process.StandardInput.Flush()
     $initialized = $false
-    for ($i=0; $i -lt 20; $i++) {
-        $line = Read-OfficialLine -TimeoutMs 5000
+    for ($i=0; $i -lt 6; $i++) {
+        $line = Read-OfficialLine -TimeoutMs 10000
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try { $message = $line | ConvertFrom-Json } catch { continue }
         if ($null -eq $message.PSObject.Properties['id']) { continue }
@@ -183,30 +338,99 @@ function Get-OfficialQuotaData {
     $request = @{ method='account/rateLimits/read'; id=$requestId; params=@{} } | ConvertTo-Json -Compress -Depth 4
     $script:officialProcess.StandardInput.WriteLine($request)
     $script:officialProcess.StandardInput.Flush()
-    for ($i=0; $i -lt 30; $i++) {
-        $line = Read-OfficialLine -TimeoutMs 5000
+    for ($i=0; $i -lt 8; $i++) {
+        $line = Read-OfficialLine -TimeoutMs 10000
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try { $message = $line | ConvertFrom-Json } catch { continue }
         if ($null -eq $message.PSObject.Properties['id'] -or $message.id -ne $requestId) { continue }
         if ($null -ne $message.PSObject.Properties['error'] -and $null -ne $message.error) { throw [string]$message.error.message }
         if ($null -eq $message.PSObject.Properties['result']) { continue }
-        $rate = $message.result.rateLimits
-        if ($null -eq $rate -or $null -eq $rate.primary -or $null -eq $rate.secondary) { throw 'Official quota response was incomplete' }
+        $rate = Get-CodexRateLimitObject -Result $message.result
+        if ($null -eq $rate -or $null -eq $rate.primary) { throw 'Official quota response was incomplete' }
+        $limits = @($rate.primary, $rate.secondary) | Where-Object { $null -ne $_ }
+        $primaryLimit = $limits | Where-Object { [int]$_.windowDurationMins -le 360 } | Select-Object -First 1
+        $secondaryLimit = $limits | Where-Object { [int]$_.windowDurationMins -ge 10000 } | Select-Object -First 1
+        # 兼容旧版“5 小时 + 每周”和新版仅返回每周额度的响应。
+        if ($null -eq $primaryLimit -and $null -eq $secondaryLimit -and $limits.Count -gt 0) { $primaryLimit = $limits[0] }
         $resetCount = $null
         if ($null -ne $message.result.rateLimitResetCredits) { $resetCount = $message.result.rateLimitResetCredits.availableCount }
+        $resetCreditDetails = @()
+        if ($null -ne $message.result.rateLimitResetCredits -and $null -ne $message.result.rateLimitResetCredits.credits) {
+            $resetCreditDetails = @($message.result.rateLimitResetCredits.credits | ForEach-Object {
+                [pscustomobject]@{
+                    Type = if (-not [string]::IsNullOrWhiteSpace([string]$_.title)) { [string]$_.title } else { [string]$_.resetType }
+                    ExpiresAt = Convert-CodexResetTime $_.expiresAt
+                }
+            })
+        }
         return [pscustomobject]@{
             Available = $true
-            PrimaryRemaining = [Math]::Max(0, [Math]::Round(100 - [double]$rate.primary.usedPercent))
-            SecondaryRemaining = [Math]::Max(0, [Math]::Round(100 - [double]$rate.secondary.usedPercent))
-            PrimaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$rate.primary.resetsAt).LocalDateTime
-            SecondaryResetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$rate.secondary.resetsAt).LocalDateTime
+            PrimaryRemaining = if ($null -ne $primaryLimit) { [Math]::Max(0, [Math]::Round(100 - [double]$primaryLimit.usedPercent)) } else { $null }
+            SecondaryRemaining = if ($null -ne $secondaryLimit) { [Math]::Max(0, [Math]::Round(100 - [double]$secondaryLimit.usedPercent)) } else { $null }
+            PrimaryResetAt = if ($null -ne $primaryLimit) { Convert-CodexResetTime $primaryLimit.resetsAt } else { $null }
+            SecondaryResetAt = if ($null -ne $secondaryLimit) { Convert-CodexResetTime $secondaryLimit.resetsAt } else { $null }
             ObservedAt = [datetime]::Now
             ResetCredits = $resetCount
+            ResetCreditDetails = $resetCreditDetails
             Source = 'Codex official quota service'
             Message = ''
         }
     }
     throw 'Official quota response timed out'
+}
+
+function Convert-UsagePanelResetTime {
+    param([string]$Value)
+    $value = $Value.Trim()
+    if ($value -match '^(?<month>\d{1,2})月(?<day>\d{1,2})日\s*(?<time>\d{1,2}:\d{2})$') {
+        $year = [datetime]::Now.Year
+        $result = [datetime]::ParseExact(("{0}-{1}-{2} {3}" -f $year, $Matches.month, $Matches.day, $Matches.time), 'yyyy-M-d H:mm', $null)
+        if ($result -lt [datetime]::Now.AddDays(-1)) { $result = $result.AddYears(1) }
+        return $result
+    }
+    return [datetime]::Parse($value)
+}
+
+function Get-UsagePanelQuotaData {
+    # ChatGPT 桌面端没有公开的用量接口。面板打开时，从其辅助功能文字中读取同一份已登录数据。
+    try {
+        Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop
+        $texts = New-Object Collections.Generic.List[string]
+        $windowHandles = Get-Process -Name ChatGPT,Codex -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowHandle -ne 0 } |
+            Select-Object -ExpandProperty MainWindowHandle -Unique
+        foreach ($windowHandle in $windowHandles) {
+            $root = [Windows.Automation.AutomationElement]::FromHandle($windowHandle)
+            if ($null -eq $root) { continue }
+            $condition = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Text)
+            foreach ($element in $root.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)) {
+                $name = $element.Current.Name
+                if (-not [string]::IsNullOrWhiteSpace($name)) { [void]$texts.Add($name) }
+            }
+        }
+        $text = ($texts -join ' ')
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        $five = [regex]::Match($text, '5\s*小时使用限制.*?剩余\s*(?<remaining>\d{1,3})%.*?将于\s*(?<reset>\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2})\s*重置', 'Singleline')
+        $week = [regex]::Match($text, '每周使用限额.*?剩余\s*(?<remaining>\d{1,3})%.*?将于\s*(?<reset>\d{1,2}月\d{1,2}日(?:\s*\d{1,2}:\d{2})?)\s*重置', 'Singleline')
+        if (-not $five.Success -or -not $week.Success) { return $null }
+        $weekReset = $week.Groups['reset'].Value
+        if ($weekReset -notmatch '\d{1,2}:\d{2}$') { $weekReset += ' 00:00' }
+        $credits = [regex]::Match($text, '可用\s*(?<count>\d+)\s*次')
+        return [pscustomobject]@{
+            Available = $true
+            PrimaryRemaining = [int]$five.Groups['remaining'].Value
+            SecondaryRemaining = [int]$week.Groups['remaining'].Value
+            PrimaryResetAt = Convert-UsagePanelResetTime $five.Groups['reset'].Value
+            SecondaryResetAt = Convert-UsagePanelResetTime $weekReset
+            ObservedAt = [datetime]::Now
+            ResetCredits = if ($credits.Success) { [int]$credits.Groups['count'].Value } else { $null }
+            Source = 'ChatGPT 使用量面板'
+            Message = ''
+        }
+    } catch {
+        Write-DiagnosticLog ('Usage panel read failed: ' + $_.Exception.Message)
+        return $null
+    }
 }
 
 function Get-QuotaData {
@@ -219,6 +443,7 @@ function Get-QuotaData {
             try {
                 $script:officialQuotaValue = Get-OfficialQuotaData
             } catch {
+                Write-DiagnosticLog ('Official quota read failed: ' + $_.Exception.Message)
                 Stop-OfficialClient
                 $fallback = Get-LogQuotaData -Path $Path
                 if ($fallback.Available) {
@@ -232,16 +457,27 @@ function Get-QuotaData {
             }
         }
         if ($null -ne $script:officialQuotaValue) { return $script:officialQuotaValue }
+        if (([datetime]::Now - $script:lastUsagePanelPoll).TotalSeconds -ge 5) {
+            $script:lastUsagePanelPoll = [datetime]::Now
+            $panelData = Get-UsagePanelQuotaData
+            if ($null -ne $panelData) { $script:usagePanelQuotaValue = $panelData }
+        }
+        if ($null -ne $script:usagePanelQuotaValue) { return $script:usagePanelQuotaValue }
     }
     return Get-LogQuotaData -Path $Path
 }
 
 function Stop-OfficialClient {
-    if ($null -eq $script:officialProcess) { return }
-    try { $script:officialProcess.StandardInput.Close() } catch { }
-    try { if (-not $script:officialProcess.HasExited) { $script:officialProcess.Kill() } } catch { }
-    try { $script:officialProcess.Dispose() } catch { }
-    $script:officialProcess = $null
+    if ($null -ne $script:officialProcess) {
+        try { $script:officialProcess.StandardInput.Close() } catch { }
+        try { if (-not $script:officialProcess.HasExited) { $script:officialProcess.Kill() } } catch { }
+        try { $script:officialProcess.Dispose() } catch { }
+        $script:officialProcess = $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($script:officialExecutableCopy)) {
+        try { Remove-Item -LiteralPath $script:officialExecutableCopy -Force -ErrorAction SilentlyContinue } catch { }
+        $script:officialExecutableCopy = $null
+    }
 }
 
 function Ensure-AutoStart {
@@ -365,6 +601,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 if ($null -eq ('QuotaBuddyWindowProbe' -as [type])) {
     Add-Type @'
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -377,6 +614,14 @@ public static class QuotaBuddyWindowProbe
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    public static void BeginResize(IntPtr hWnd, int hitTest)
+    {
+        ReleaseCapture();
+        SendMessage(hWnd, 0xA1, (IntPtr)hitTest, IntPtr.Zero);
+    }
 
     public static int[] FindVisibleCodexWindow(int width, int height)
     {
@@ -389,7 +634,7 @@ public static class QuotaBuddyWindowProbe
             if (pid == currentPid) return true;
             try {
                 string processName = Process.GetProcessById((int)pid).ProcessName;
-                if (!String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase)) return true;
+                if (!String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase) && !String.Equals(processName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) return true;
             } catch { return true; }
             RECT rect;
             if (!GetWindowRect(hWnd, out rect)) return true;
@@ -404,11 +649,29 @@ public static class QuotaBuddyWindowProbe
         return found;
     }
 
+    public static IntPtr[] FindVisibleAppWindows()
+    {
+        var windows = new List<IntPtr>();
+        uint currentPid = (uint)Process.GetCurrentProcess().Id;
+        EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pid == currentPid) return true;
+            try {
+                string processName = Process.GetProcessById((int)pid).ProcessName;
+                if (String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase) || String.Equals(processName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) windows.Add(hWnd);
+            } catch { }
+            return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+    }
+
     public static bool IsCodexRunning()
     {
         foreach (Process process in Process.GetProcesses()) {
             try {
-                if (String.Equals(process.ProcessName, "Codex", StringComparison.OrdinalIgnoreCase)) {
+                if (String.Equals(process.ProcessName, "Codex", StringComparison.OrdinalIgnoreCase) || String.Equals(process.ProcessName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) {
                     return true;
                 }
             } catch { }
@@ -420,128 +683,127 @@ public static class QuotaBuddyWindowProbe
 }
 
 $strings = if ($Language -eq 'en-US') {
-    @{ Title='Codex quota'; Primary='5 hours'; Secondary='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; Resets='resets'; ResetAt='reset'; Credits='available resets' }
+    @{ Title='Codex quota'; Weekly='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; ResetAt='reset'; Credits='available resets'; CreditType='Full reset'; Expires='expires'; NoCredits='No reset credits'; CreditDetailsUnavailable='Reset details unavailable' }
 } else {
-    @{ Title='Codex额度'; Primary='5小时'; Secondary='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; Resets='次重置'; ResetAt='重置'; Credits='可用重置' }
+    @{ Title='Codex额度'; Weekly='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; ResetAt='重置'; Credits='可用重置'; CreditType='全额重置'; Expires='到期'; NoCredits='暂无可用重置'; CreditDetailsUnavailable='重置详情暂不可用' }
 }
 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Width="210" Height="102" MinWidth="60" MinHeight="60" MaxWidth="480" MaxHeight="230" ShowActivated="False"
+ Width="246" Height="118" MinWidth="80" MinHeight="72" MaxWidth="480" MaxHeight="230" ShowActivated="False"
  WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False"
  ResizeMode="CanResizeWithGrip" Left="1550" Top="680">
  <Grid x:Name="RootGrid" Margin="5">
   <Border x:Name="Card" CornerRadius="12" Background="#F4FFFFFF" BorderBrush="#26000000" BorderThickness="1" Padding="8,6,8,6">
    <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.20"/></Border.Effect>
    <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="21"/><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <Grid.RowDefinitions><RowDefinition Height="21"/><RowDefinition Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid x:Name="DragArea" Cursor="SizeAll">
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <Ellipse x:Name="PulseDot" Width="7" Height="7" Fill="#24B36B" Margin="0,0,7,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
      <TextBlock x:Name="TitleText" Grid.Column="1" FontWeight="SemiBold" FontSize="12" Foreground="#272B31" VerticalAlignment="Center"/>
      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"><TextBlock x:Name="ResetCountText" Foreground="#858B95" FontSize="9" FontWeight="SemiBold"/><TextBlock x:Name="Updated" Foreground="#858B95" FontSize="9"/></StackPanel>
     </Grid>
-    <Grid x:Name="PrimaryRow" Grid.Row="1" Margin="0,1,0,0">
+     <Grid x:Name="WeeklyRow" Grid.Row="1" Margin="0,1,0,0">
      <Grid.RowDefinitions><RowDefinition Height="16"/><RowDefinition Height="12"/></Grid.RowDefinitions>
      <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
-     <TextBlock x:Name="PrimaryLabel" Foreground="#353A42" FontSize="11.5" VerticalAlignment="Center"/>
-     <ProgressBar x:Name="PrimaryBar" Grid.Column="1" Height="7" Minimum="0" Maximum="100" Margin="3,0,5,0" VerticalAlignment="Center" Foreground="#25B96D" Background="#E4E7EA"/>
-     <TextBlock x:Name="PrimaryText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
-     <TextBlock x:Name="PrimaryReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
-    </Grid>
-    <Grid x:Name="SecondaryRow" Grid.Row="2" Margin="0,0,0,0">
-     <Grid.RowDefinitions><RowDefinition Height="16"/><RowDefinition Height="12"/></Grid.RowDefinitions>
-     <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
-     <TextBlock x:Name="SecondaryLabel" Foreground="#353A42" FontSize="11.5" VerticalAlignment="Center"/>
-     <ProgressBar x:Name="SecondaryBar" Grid.Column="1" Height="7" Minimum="0" Maximum="100" Margin="3,0,5,0" VerticalAlignment="Center" Foreground="#25B96D" Background="#E4E7EA"/>
-     <TextBlock x:Name="SecondaryText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
-     <TextBlock x:Name="SecondaryReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
-    </Grid>
+      <TextBlock x:Name="WeeklyLabel" Foreground="#353A42" FontSize="11.5" VerticalAlignment="Center"/>
+      <ProgressBar x:Name="WeeklyBar" Grid.Column="1" Height="7" Minimum="0" Maximum="100" Margin="3,0,5,0" VerticalAlignment="Center" Foreground="#25B96D" Background="#E4E7EA"/>
+      <TextBlock x:Name="WeeklyText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
+      <TextBlock x:Name="WeeklyReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
+     </Grid>
+     <TextBlock x:Name="CreditDetailsText" Grid.Row="2" Foreground="#656B75" FontSize="8.5" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center"/>
     <StackPanel x:Name="CompactPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="CompactDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="CompactTitle" FontWeight="SemiBold" FontSize="8" Foreground="#272B31"/></StackPanel>
-     <TextBlock x:Name="CompactPrimary" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center"/>
-     <TextBlock x:Name="CompactPrimaryReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
-     <TextBlock x:Name="CompactSecondary" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,2,0,0"/>
-     <TextBlock x:Name="CompactSecondaryReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
+      <TextBlock x:Name="CompactWeekly" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+      <TextBlock x:Name="CompactWeeklyReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
      <TextBlock x:Name="CompactCredits" FontSize="7.5" FontWeight="SemiBold" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap" Margin="0,2,0,0"/>
     </StackPanel>
     <StackPanel x:Name="MediumPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="MediumDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="MediumTitle" FontWeight="SemiBold" FontSize="8.5" Foreground="#272B31"/></StackPanel>
-     <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumPrimaryLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumPrimaryText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
-     <ProgressBar x:Name="MediumPrimaryBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
-     <TextBlock x:Name="MediumPrimaryReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
-     <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumSecondaryLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumSecondaryText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
-     <ProgressBar x:Name="MediumSecondaryBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
-     <TextBlock x:Name="MediumSecondaryReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
+      <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumWeeklyLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumWeeklyText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
+      <ProgressBar x:Name="MediumWeeklyBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
+      <TextBlock x:Name="MediumWeeklyReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
      <TextBlock x:Name="MediumCredits" FontSize="7" FontWeight="SemiBold" Foreground="#777D86" TextAlignment="Center" Margin="0,1,0,0"/>
     </StackPanel>
    </Grid>
   </Border>
-  <ResizeGrip HorizontalAlignment="Right" VerticalAlignment="Bottom" Width="14" Height="14" Opacity="0.35"/>
+  <Border x:Name="RightResizeHandle" HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="7" Background="Transparent" Cursor="SizeWE" ToolTip="拖动调整宽度"/>
+  <Border x:Name="BottomResizeHandle" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="7" Background="Transparent" Cursor="SizeNS" ToolTip="拖动调整高度"/>
+  <ResizeGrip x:Name="ResizeHandle" HorizontalAlignment="Right" VerticalAlignment="Bottom" Width="20" Height="20" Opacity="0.70" Cursor="SizeNWSE" ToolTip="拖动调整宽度和高度"/>
  </Grid>
 </Window>
 '@
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = 'RootGrid','Card','DragArea','PrimaryRow','SecondaryRow','CompactPanel','CompactDot','CompactTitle','CompactPrimary','CompactPrimaryReset','CompactSecondary','CompactSecondaryReset','CompactCredits','MediumPanel','MediumDot','MediumTitle','MediumPrimaryLabel','MediumPrimaryText','MediumPrimaryBar','MediumPrimaryReset','MediumSecondaryLabel','MediumSecondaryText','MediumSecondaryBar','MediumSecondaryReset','MediumCredits','ResetCountText','Updated','PulseDot','TitleText','PrimaryLabel','SecondaryLabel','PrimaryBar','PrimaryText','PrimaryReset','SecondaryBar','SecondaryText','SecondaryReset'
+if ($ValidateUI -and $ValidateWidth -gt 0) {
+    $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, $ValidateWidth))
+}
+$names = 'RootGrid','Card','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','WeeklyRow','CreditDetailsText','CompactPanel','CompactDot','CompactTitle','CompactWeekly','CompactWeeklyReset','CompactCredits','MediumPanel','MediumDot','MediumTitle','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumCredits','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
 $ui = @{}; foreach ($name in $names) { $ui[$name] = $window.FindName($name) }
 $ui.TitleText.Text = $strings.Title
-$ui.PrimaryLabel.Text = $strings.Primary
-$ui.SecondaryLabel.Text = $strings.Secondary
+$ui.WeeklyLabel.Text = $strings.Weekly
 $ui.CompactTitle.Text = $strings.Title
 $ui.MediumTitle.Text = $strings.Title
-$ui.MediumPrimaryLabel.Text = $strings.Primary
-$ui.MediumSecondaryLabel.Text = $strings.Secondary
+$ui.MediumWeeklyLabel.Text = $strings.Weekly
 
 function Update-Display {
     $data = Get-QuotaData -Path $DataFile
     $ui.ResetCountText.Text = ''
     $ui.Updated.Text = [datetime]::Now.ToString('HH:mm')
     if (-not $data.Available) {
-        $ui.PrimaryText.Text = '--'; $ui.SecondaryText.Text = '--'
-        $ui.PrimaryReset.Text = $strings.Unavailable; $ui.SecondaryReset.Text = $strings.Unavailable
-        $ui.CompactPrimary.Text = $strings.Primary + ' --'
-        $ui.CompactSecondary.Text = $strings.Secondary + ' --'
-        $ui.CompactPrimaryReset.Text = $strings.Unavailable
-        $ui.CompactSecondaryReset.Text = $strings.Unavailable
+        $ui.WeeklyText.Text = '--'; $ui.WeeklyReset.Text = $strings.Unavailable
+        $ui.CompactWeekly.Text = $strings.Weekly + ' --'
+        $ui.CompactWeeklyReset.Text = $strings.Unavailable
         $ui.CompactCredits.Text = $strings.Unavailable
-        $ui.MediumPrimaryText.Text = '--'; $ui.MediumSecondaryText.Text = '--'
-        $ui.MediumPrimaryReset.Text = $strings.Unavailable; $ui.MediumSecondaryReset.Text = $strings.Unavailable
+        $ui.MediumWeeklyText.Text = '--'; $ui.MediumWeeklyReset.Text = $strings.Unavailable
         $ui.MediumCredits.Text = $strings.Unavailable
-        $ui.MediumPrimaryBar.Value = 0; $ui.MediumSecondaryBar.Value = 0
+        $ui.CreditDetailsText.Text = $strings.Unavailable
+        $ui.MediumWeeklyBar.Value = 0
         $ui.Card.ToolTip = $data.Message
-        $ui.PrimaryBar.Value = 0; $ui.SecondaryBar.Value = 0
+        $ui.WeeklyBar.Value = 0
         Set-QuotaState -State 'unknown'
         Update-ResponsiveLayout
         return
     }
-    $ui.PrimaryBar.Value = $data.PrimaryRemaining; $ui.SecondaryBar.Value = $data.SecondaryRemaining
+    $weeklyAvailable = ($null -ne $data.SecondaryRemaining)
+    $weeklyValue = if ($weeklyAvailable) { [int]$data.SecondaryRemaining } else { 0 }
+    $weeklyDisplay = if ($weeklyAvailable) { "$weeklyValue%" } else { '--' }
+    $weeklyResetText = if ($weeklyAvailable) { Format-ResetTime $data.SecondaryResetAt } else { $strings.Unavailable }
+    $ui.WeeklyBar.Value = $weeklyValue
     $ui.Card.ToolTip = $null
+    $creditDetailLines = @()
+    $creditCountText = $strings.Credits + ' --'
     if ($null -ne $data.PSObject.Properties['ResetCredits'] -and $null -ne $data.ResetCredits) {
         $ui.ResetCountText.Text = if ($Language -eq 'en-US') { "$($data.ResetCredits)x · " } else { "$($data.ResetCredits)次 · " }
         $ui.Updated.Text = [datetime]::Now.ToString('HH:mm')
-        $ui.CompactCredits.Text = $strings.Credits + ' ' + $data.ResetCredits
-        $ui.MediumCredits.Text = $strings.Credits + ' ' + $data.ResetCredits
-    } else {
-        $ui.CompactCredits.Text = $strings.Credits + ' --'
-        $ui.MediumCredits.Text = $strings.Credits + ' --'
+        $creditCountText = $strings.Credits + ' ' + $data.ResetCredits
+        if ($null -ne $data.PSObject.Properties['ResetCreditDetails']) {
+            foreach ($credit in @($data.ResetCreditDetails)) {
+                $typeText = if ([string]$credit.Type -eq 'Full reset') { $strings.CreditType } else { [string]$credit.Type }
+                $expiryText = if ($Language -eq 'en-US') { ([datetime]$credit.ExpiresAt).ToString('MMM d HH:mm', [Globalization.CultureInfo]::GetCultureInfo('en-US')) } else { ([datetime]$credit.ExpiresAt).ToString('M月d日 HH:mm') }
+                $creditDetailLines += ('{0} · {1} {2}' -f $typeText, $strings.Expires, $expiryText)
+            }
+        }
     }
-    $ui.PrimaryText.Text = "$($data.PrimaryRemaining)%"; $ui.SecondaryText.Text = "$($data.SecondaryRemaining)%"
-    $primaryResetText = Format-ResetTime $data.PrimaryResetAt
-    $secondaryResetText = Format-ResetTime $data.SecondaryResetAt
-    $ui.PrimaryReset.Text = $primaryResetText
-    $ui.SecondaryReset.Text = $secondaryResetText
-    $ui.CompactPrimary.Text = $strings.Primary + ' ' + $data.PrimaryRemaining + '%'
-    $ui.CompactSecondary.Text = $strings.Secondary + ' ' + $data.SecondaryRemaining + '%'
-    $ui.CompactPrimaryReset.Text = $primaryResetText
-    $ui.CompactSecondaryReset.Text = $secondaryResetText
-    $ui.MediumPrimaryText.Text = "$($data.PrimaryRemaining)%"
-    $ui.MediumSecondaryText.Text = "$($data.SecondaryRemaining)%"
-    $ui.MediumPrimaryBar.Value = $data.PrimaryRemaining; $ui.MediumSecondaryBar.Value = $data.SecondaryRemaining
-    $ui.MediumPrimaryReset.Text = $primaryResetText; $ui.MediumSecondaryReset.Text = $secondaryResetText
-    if ($data.PrimaryRemaining -le 5) { Set-QuotaState -State 'critical' }
-    elseif ($data.PrimaryRemaining -le 20) { Set-QuotaState -State 'low' }
-    elseif ($data.PrimaryRemaining -lt 50) { Set-QuotaState -State 'saving' }
+    $wideCreditText = if ($creditDetailLines.Count -gt 0) { $creditDetailLines -join [Environment]::NewLine } elseif ($data.ResetCredits -eq 0) { $strings.NoCredits } else { $strings.CreditDetailsUnavailable }
+    $compactCreditLines = @($creditCountText) + @($creditDetailLines)
+    $compactCreditText = $compactCreditLines -join [Environment]::NewLine
+    $script:creditDetailLineCount = [Math]::Max(1, $creditDetailLines.Count)
+    $script:wideCreditLines = if ($creditDetailLines.Count -gt 0) { @($creditDetailLines) } else { @($wideCreditText) }
+    $ui.CreditDetailsText.Text = $wideCreditText
+    $ui.CompactCredits.Text = $compactCreditText
+    $ui.MediumCredits.Text = $compactCreditText
+    $ui.WeeklyText.Text = $weeklyDisplay; $ui.WeeklyReset.Text = $weeklyResetText
+    $ui.CompactWeekly.Text = $strings.Weekly + ' ' + $weeklyDisplay
+    $ui.CompactWeeklyReset.Text = $weeklyResetText
+    $ui.MediumWeeklyText.Text = $weeklyDisplay
+    $ui.MediumWeeklyBar.Value = $weeklyValue
+    $ui.MediumWeeklyReset.Text = $weeklyResetText
+    if (-not $weeklyAvailable) { Set-QuotaState -State 'unknown' }
+    elseif ($weeklyValue -le 5) { Set-QuotaState -State 'critical' }
+    elseif ($weeklyValue -le 20) { Set-QuotaState -State 'low' }
+    elseif ($weeklyValue -lt 50) { Set-QuotaState -State 'saving' }
     else { Set-QuotaState -State 'normal' }
     Update-ResponsiveLayout
 }
@@ -560,6 +822,12 @@ function Set-QuotaState {
     $ui.PulseDot.Fill = $settings[0]
     $ui.CompactDot.Fill = $settings[0]
     $ui.MediumDot.Fill = $settings[0]
+    $quotaBrush = [Windows.Media.BrushConverter]::new().ConvertFromString($settings[0])
+    $ui.WeeklyBar.Foreground = $quotaBrush
+    $ui.MediumWeeklyBar.Foreground = $quotaBrush
+    $ui.WeeklyText.Foreground = $quotaBrush
+    $ui.CompactWeekly.Foreground = $quotaBrush
+    $ui.MediumWeeklyText.Foreground = $quotaBrush
     $animation = New-Object Windows.Media.Animation.DoubleAnimation
     $animation.From = 0.28; $animation.To = 1.0
     $animation.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds([double]$settings[1]))
@@ -652,23 +920,16 @@ function Test-CodexRunning {
 function Sync-WithOfficialPet {
     if (-not $FollowPet) { return $false }
     $pet = Get-OfficialPetState
-    $petWindowRect = $null
-    if ($null -ne $pet -and $pet.Open) {
-        $petWindowRect = [QuotaBuddyWindowProbe]::FindVisibleCodexWindow([int]$pet.Width, [int]$pet.Height)
-    }
-    if ($null -eq $pet -or $null -eq $petWindowRect) {
+    if ($null -eq $pet -or -not $pet.Open) {
         return $false
     }
 
     $ratio = [Math]::Max(0.7, [Math]::Min(2.0, $pet.MascotWidth / 80.0))
-    if ($script:lastMascotWidth -ne $pet.MascotWidth) {
-        $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, 210 * $ratio))
-        $window.Height = [Math]::Max($window.MinHeight, [Math]::Min($window.MaxHeight, 102 * $ratio))
-        $script:lastMascotWidth = $pet.MascotWidth
-    }
+    # 宠物只决定面板位置，绝不覆盖用户手动设置的尺寸。
+    $script:lastMascotWidth = $pet.MascotWidth
 
-    $petCenterX = $petWindowRect[0] + $pet.MascotLeft + ($pet.MascotWidth / 2.0)
-    $petBottomY = $petWindowRect[1] + $pet.MascotTop + $pet.MascotHeight + 4.0
+    $petCenterX = $pet.X + $pet.MascotLeft + ($pet.MascotWidth / 2.0)
+    $petBottomY = $pet.Y + $pet.MascotTop + $pet.MascotHeight + 4.0
     $source = [Windows.PresentationSource]::FromVisual($window)
     if ($null -ne $source -and $null -ne $source.CompositionTarget) {
         $point = $source.CompositionTarget.TransformFromDevice.Transform([Windows.Point]::new($petCenterX, $petBottomY))
@@ -706,6 +967,13 @@ $exitItem = New-Object Windows.Controls.MenuItem; $exitItem.Header = $strings.Ex
 [void]$menu.Items.Add($refreshItem); [void]$menu.Items.Add($exitItem)
 $refreshItem.Add_Click({ Update-Display }); $exitItem.Add_Click({ $window.Close() })
 $ui.Card.ContextMenu = $menu
+$window.ContextMenu = $menu
+$window.Add_PreviewMouseRightButtonUp({
+    param($sender, $eventArgs)
+    $menu.PlacementTarget = $window
+    $menu.IsOpen = $true
+    $eventArgs.Handled = $true
+})
 function Start-QuotaBuddyDrag {
     try { $window.DragMove() } catch { }
     Move-WindowIntoVirtualDesktop
@@ -714,74 +982,113 @@ function Start-QuotaBuddyDrag {
 $ui.DragArea.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 $ui.CompactPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 $ui.MediumPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
+$ui.ResizeHandle.Add_MouseLeftButtonDown({
+    param($sender, $eventArgs)
+    $handle = New-Object Windows.Interop.WindowInteropHelper($window)
+    [QuotaBuddyWindowProbe]::BeginResize($handle.Handle, 17)
+    $eventArgs.Handled = $true
+})
+$ui.RightResizeHandle.Add_MouseLeftButtonDown({
+    param($sender, $eventArgs)
+    $handle = New-Object Windows.Interop.WindowInteropHelper($window)
+    [QuotaBuddyWindowProbe]::BeginResize($handle.Handle, 11)
+    $eventArgs.Handled = $true
+})
+$ui.BottomResizeHandle.Add_MouseLeftButtonDown({
+    param($sender, $eventArgs)
+    $handle = New-Object Windows.Interop.WindowInteropHelper($window)
+    [QuotaBuddyWindowProbe]::BeginResize($handle.Handle, 15)
+    $eventArgs.Handled = $true
+})
 function Update-ResponsiveLayout {
     if ($script:adjustingResponsiveSize) { return }
     $script:adjustingResponsiveSize = $true
     try {
         $currentWidth = if ($window.ActualWidth -gt 0) { $window.ActualWidth } else { $window.Width }
-        $ultraCompact = ($currentWidth -lt 80)
-        $mediumCompact = ($currentWidth -ge 80 -and $currentWidth -lt 130)
+        $ultraCompact = ($currentWidth -lt 120)
+        $mediumCompact = ($currentWidth -ge 120 -and $currentWidth -lt 185)
         if ($ultraCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.PrimaryRow.Visibility = 'Collapsed'; $ui.SecondaryRow.Visibility = 'Collapsed'
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsText.Visibility = 'Collapsed'
             $ui.CompactPanel.Visibility = 'Visible'
             $ui.MediumPanel.Visibility = 'Collapsed'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(1)
             $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = [Math]::Max(7.0, [Math]::Min(10.0, 7.0 + (($currentWidth - 60.0) / 40.0)))
+            $fontSize = [Math]::Max(7.5, [Math]::Min(9.5, 7.5 + (($currentWidth - 80.0) / 40.0)))
             $ui.CompactTitle.FontSize = $fontSize
-            $ui.CompactPrimary.FontSize = $fontSize
-            $ui.CompactSecondary.FontSize = $fontSize
-            $ui.CompactPrimaryReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
-            $ui.CompactSecondaryReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
+            $ui.CompactWeekly.FontSize = $fontSize
+            $ui.CompactWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
             $ui.CompactCredits.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
-            $availableWidth = [Math]::Max(20.0, $currentWidth - 10.0)
+            $availableWidth = [Math]::Max(60.0, $currentWidth - 10.0)
             $ui.CompactPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
             $targetHeight = [Math]::Ceiling($ui.CompactPanel.DesiredSize.Height + 10.0)
-            $targetHeight = [Math]::Max(60.0, [Math]::Min($window.MaxHeight, $targetHeight))
+            $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, $targetHeight))
         } elseif ($mediumCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.PrimaryRow.Visibility = 'Collapsed'; $ui.SecondaryRow.Visibility = 'Collapsed'
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsText.Visibility = 'Collapsed'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Visible'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(1)
             $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = [Math]::Max(7.5, [Math]::Min(9.5, 7.5 + (($currentWidth - 80.0) / 30.0)))
+            $fontSize = [Math]::Max(8.0, [Math]::Min(10.0, 8.0 + (($currentWidth - 120.0) / 65.0)))
             $ui.MediumTitle.FontSize = $fontSize + 0.5
-            $ui.MediumPrimaryLabel.FontSize = $fontSize; $ui.MediumSecondaryLabel.FontSize = $fontSize
-            $ui.MediumPrimaryText.FontSize = $fontSize; $ui.MediumSecondaryText.FontSize = $fontSize
-            $ui.MediumPrimaryReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
-            $ui.MediumSecondaryReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
+            $ui.MediumWeeklyLabel.FontSize = $fontSize
+            $ui.MediumWeeklyText.FontSize = $fontSize
+            $ui.MediumWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
             $ui.MediumCredits.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
-            $availableWidth = [Math]::Max(30.0, $currentWidth - 10.0)
+            $availableWidth = [Math]::Max(100.0, $currentWidth - 10.0)
             $ui.MediumPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
             $targetHeight = [Math]::Ceiling($ui.MediumPanel.DesiredSize.Height + 10.0)
-            $targetHeight = [Math]::Max(88.0, [Math]::Min($window.MaxHeight, $targetHeight))
+            $targetHeight = [Math]::Max(82.0, [Math]::Min($window.MaxHeight, $targetHeight))
         } else {
-            $ui.DragArea.Visibility = 'Visible'; $ui.PrimaryRow.Visibility = 'Visible'; $ui.SecondaryRow.Visibility = 'Visible'
+            $ui.DragArea.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsText.Visibility = 'Visible'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Collapsed'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(5)
             $ui.Card.Padding = [Windows.Thickness]::new(8,6,8,6)
-            if ($currentWidth -lt 160) {
+            if ($currentWidth -lt 220) {
                 $ui.TitleText.FontSize = 10
                 $ui.Updated.FontSize = 7; $ui.ResetCountText.FontSize = 7
                 $ui.PulseDot.Width = 5; $ui.PulseDot.Height = 5; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,4,0)
-                $ui.PrimaryLabel.FontSize = 10; $ui.SecondaryLabel.FontSize = 10
-                $ui.PrimaryText.FontSize = 11; $ui.SecondaryText.FontSize = 11
-                $ui.PrimaryReset.FontSize = 8; $ui.SecondaryReset.FontSize = 8
+                $ui.WeeklyLabel.FontSize = 10
+                $ui.WeeklyText.FontSize = 11
+                $ui.WeeklyReset.FontSize = 8; $ui.CreditDetailsText.FontSize = 7.5
             } else {
                 $ui.TitleText.FontSize = 12
                 $ui.Updated.FontSize = 9; $ui.ResetCountText.FontSize = 9
                 $ui.PulseDot.Width = 7; $ui.PulseDot.Height = 7; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,7,0)
-                $ui.PrimaryLabel.FontSize = 11.5; $ui.SecondaryLabel.FontSize = 11.5
-                $ui.PrimaryText.FontSize = 12; $ui.SecondaryText.FontSize = 12
-                $ui.PrimaryReset.FontSize = 9; $ui.SecondaryReset.FontSize = 9
+                $ui.WeeklyLabel.FontSize = 11.5
+                $ui.WeeklyText.FontSize = 12
+                $ui.WeeklyReset.FontSize = 9; $ui.CreditDetailsText.FontSize = 8.5
             }
-            $targetHeight = 102
+            if ($currentWidth -ge 330 -and $script:wideCreditLines.Count -gt 1) {
+                $ui.CreditDetailsText.Text = $script:wideCreditLines -join '    '
+                $effectiveCreditLines = 1
+            } else {
+                $ui.CreditDetailsText.Text = $script:wideCreditLines -join [Environment]::NewLine
+                $effectiveCreditLines = $script:creditDetailLineCount
+            }
+            $targetHeight = [Math]::Min($window.MaxHeight, 82.0 + (13.0 * $effectiveCreditLines))
         }
-        if ([Math]::Abs($window.Height - $targetHeight) -gt 0.5) { $window.Height = $targetHeight }
+        # 记录恰好容纳内容的高度；拖动停止后窗口会自动收紧到这个高度。
+        $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($targetHeight)))
+        $window.MinHeight = $targetHeight
+        $script:targetContentHeight = $targetHeight
+        if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
     } finally {
         $script:adjustingResponsiveSize = $false
     }
 }
-$window.Add_SizeChanged({ Update-ResponsiveLayout; Save-WindowPlacement })
+$resizeSettleTimer = New-Object Windows.Threading.DispatcherTimer
+$resizeSettleTimer.Interval = [TimeSpan]::FromMilliseconds(220)
+$resizeSettleTimer.Add_Tick({
+    $resizeSettleTimer.Stop()
+    if ([Math]::Abs($window.Height - $script:targetContentHeight) -gt 0.5) {
+        $window.Height = $script:targetContentHeight
+    }
+    Save-WindowPlacement
+})
+$window.Add_SizeChanged({
+    Update-ResponsiveLayout
+    $resizeSettleTimer.Stop()
+    $resizeSettleTimer.Start()
+})
 $window.Add_LocationChanged({ Save-WindowPlacement })
 function Switch-QuotaBuddyLanguage([string]$TargetLanguage) {
     if ($TargetLanguage -eq $Language) { return }
@@ -826,16 +1133,25 @@ $timer.Add_Tick({
         return
     }
     Update-WindowPresence
-    if ($window.IsVisible) { Update-Display }
+    if ($window.IsVisible -and ([datetime]::Now - $script:lastDisplayRefresh).TotalSeconds -ge 5) {
+        $script:lastDisplayRefresh = [datetime]::Now
+        Update-Display
+    }
 })
 $timer.Start()
 if (-not $ValidateUI) { Restore-WindowPlacement }
 Update-Display
 if ($ValidateUI) {
+    $window.Height = $script:targetContentHeight
     Write-Output 'UI_OK'
     Write-Output ('COLOR=' + $ui.PulseDot.Fill.ToString())
+    Write-Output ('WEEKLY_COLOR=' + $ui.WeeklyText.Foreground.ToString())
+    Write-Output ('WEEKLY_BAR_COLOR=' + $ui.WeeklyBar.Foreground.ToString())
     Write-Output ('RESET_WEIGHT=' + $ui.ResetCountText.FontWeight.ToString())
-    Write-Output ('SECONDARY_RESET=' + $ui.SecondaryReset.Text)
+    Write-Output ('WEEKLY_RESET=' + $ui.WeeklyReset.Text)
+    Write-Output ('CREDIT_DETAILS=' + ($ui.CreditDetailsText.Text -replace [Environment]::NewLine, ' | '))
+    $layoutName = if ($ui.CompactPanel.Visibility -eq 'Visible') { 'compact' } elseif ($ui.MediumPanel.Visibility -eq 'Visible') { 'medium' } else { 'wide' }
+    Write-Output ('LAYOUT={0};WIDTH={1};HEIGHT={2}' -f $layoutName, [Math]::Round($window.Width), [Math]::Round($window.Height))
     $window.Close()
     exit
 }
