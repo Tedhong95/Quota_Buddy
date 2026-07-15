@@ -4,7 +4,9 @@ $app = Join-Path $root 'src\QuotaBuddy.ps1'
 $launcher = Join-Path $root 'src\LaunchQuotaBuddy.vbs'
 $sample = Join-Path $env:TEMP ("quota-buddy-test-$([guid]::NewGuid().ToString('N')).log")
 $petSample = Join-Path $env:TEMP ("quota-buddy-pet-test-$([guid]::NewGuid().ToString('N')).json")
-$fixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":23,"window_minutes":300,"reset_after_seconds":5000,"reset_at":1893456000},"secondary":{"used_percent":41,"window_minutes":10080,"reset_after_seconds":90000,"reset_at":1893542400}}' + [Environment]::NewLine + '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
+$testPrimaryReset = [DateTimeOffset]::Now.AddHours(2).ToUnixTimeSeconds()
+$testSecondaryReset = [DateTimeOffset]::Now.AddDays(2).ToUnixTimeSeconds()
+$fixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":23,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":41,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}' + [Environment]::NewLine + '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}'
 [IO.File]::WriteAllText($sample, $fixture, [Text.Encoding]::UTF8)
 try {
     $petFixture = '{"electron-avatar-overlay-open":true,"electron-avatar-overlay-bounds":{"x":100,"y":200,"width":300,"height":260,"mascot":{"left":20,"top":30,"width":80,"height":90}}}'
@@ -81,18 +83,19 @@ try {
     $uiZh = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
     $uiEn = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language en-US -DataFile $sample
     if ($uiZh -notcontains 'UI_OK' -or $uiEn -notcontains 'UI_OK') { throw '中英文悬浮窗口未能正确建立' }
+    if ($uiZh -notcontains 'TRANSPARENT_WINDOW=True' -or $uiEn -notcontains 'TRANSPARENT_WINDOW=True') { throw '窗口透明圆角外观未保持' }
     if (-not ($uiZh -match 'WEEKLY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
     if (-not ($uiEn -match 'WEEKLY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'WEEKLY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
     if ($uiZh -match '5小时' -or $uiEn -match '5 hours') { throw '界面仍显示已取消的 5 小时额度' }
     if (-not ($uiZh -match 'COLOR=#FF34C759')) { throw '充足额度未显示绿色状态灯' }
     if (-not ($uiZh -match 'WEEKLY_COLOR=#FF34C759') -or -not ($uiZh -match 'WEEKLY_BAR_COLOR=#FF34C759')) { throw '每周额度文字或进度条未与呼吸灯保持同色' }
-    $secondaryLowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
+    $secondaryLowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}'
     [IO.File]::WriteAllText($sample, $secondaryLowFixture, [Text.Encoding]::UTF8)
     $uiSecondaryLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
     if (-not ($uiSecondaryLow -match 'COLOR=#FFB91C1C')) { throw '每周额度极低时状态灯未正确变色' }
     if (-not ($uiSecondaryLow -match 'WEEKLY_COLOR=#FFB91C1C') -or -not ($uiSecondaryLow -match 'WEEKLY_BAR_COLOR=#FFB91C1C')) { throw '极低额度时文字、进度条和呼吸灯颜色不一致' }
     if (-not ($uiZh -match 'RESET_WEIGHT=SemiBold') -or -not ($uiEn -match 'RESET_WEIGHT=SemiBold')) { throw '宽屏重置次数未保持半粗体' }
-    $lowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":85,"window_minutes":300,"reset_after_seconds":4900,"reset_at":1893456000},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":89900,"reset_at":1893542400}}'
+    $lowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":85,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}'
     [IO.File]::WriteAllText($sample, $lowFixture, [Text.Encoding]::UTF8)
     $uiLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
     if (-not ($uiLow -match 'COLOR=#FF34C759')) { throw '状态灯错误地使用了已取消的 5 小时额度' }

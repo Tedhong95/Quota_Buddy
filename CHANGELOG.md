@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.0 - 2026-07-15
+
+- Improved responsive typography so text and status elements scale continuously with the panel width while the layout remains compact.
+- Aligned reset-credit types and expiration dates into stable left/right columns; narrow layouts omit the expiration label to prevent clipping.
+- Centered the available-reset summary in compact and medium layouts and reserved space for the resize grip.
+- Added per-monitor DPI awareness for sharper text on displays using 125%, 150%, or mixed scaling.
+- Reduced pet-follow jitter with faster position updates, sub-pixel filtering, shared-file retries, and cached pet-state reads.
+- Improved topmost refresh behavior so the transparent panel remains visible above application windows.
+- Made the most recently launched old/new or Chinese/English entry replace any previously running Quota Buddy instance.
+- Updated self-tests to use current relative reset times instead of dates that eventually expire.
+
 ## v0.2.1 - 2026-07-13
 
 - Fixed pet alignment on computers using non-100% display scaling by using the desktop coordinates directly.

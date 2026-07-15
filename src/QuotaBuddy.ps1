@@ -16,6 +16,19 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Ask Windows for native per-monitor rendering before WPF creates a window.
+if ($null -eq ('QuotaBuddyDpiBootstrap' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class QuotaBuddyDpiBootstrap {
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+}
+'@
+}
+try { [void][QuotaBuddyDpiBootstrap]::SetProcessDpiAwarenessContext([intptr](-4)) } catch { }
 $script:quotaCachePath = $null
 $script:quotaCacheStamp = $null
 $script:quotaCacheValue = $null
@@ -45,6 +58,10 @@ $script:wideCreditLines = @()
 $script:positioningForPet = $false
 $script:wasFollowingPet = $false
 $script:noPetPositionInitialized = $false
+$script:lastTopmostRefresh = [datetime]::MinValue
+$script:lastValidPetState = $null
+$script:lastPetStateFailureLog = [datetime]::MinValue
+$script:lastPetStateStamp = $null
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -502,8 +519,33 @@ function Ensure-AutoStart {
 }
 
 function Get-OfficialPetState {
-    try {
-        $text = [IO.File]::ReadAllText($script:globalStatePath, [Text.Encoding]::UTF8)
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+      try {
+        $item = Get-Item -LiteralPath $script:globalStatePath
+        $stamp = '{0}:{1}' -f $item.Length, $item.LastWriteTimeUtc.Ticks
+        if ($script:lastPetStateStamp -eq $stamp -and $null -ne $script:lastValidPetState) {
+            return $script:lastValidPetState
+        }
+        $stream = [IO.File]::Open($script:globalStatePath, 'Open', 'Read', 'ReadWrite,Delete')
+        try {
+            $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
+            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        } finally { if ($null -ne $stream) { $stream.Dispose() } }
+        # The desktop state can grow very large. Read only the pet block first
+        # so following remains fast even after years of conversation history.
+        $petPattern = '"electron-avatar-overlay-open"\s*:\s*(?<open>true|false).*?"electron-avatar-overlay-bounds"\s*:\s*\{\s*"x"\s*:\s*(?<x>-?[\d.]+)\s*,\s*"y"\s*:\s*(?<y>-?[\d.]+)\s*,\s*"width"\s*:\s*(?<w>[\d.]+)\s*,\s*"height"\s*:\s*(?<h>[\d.]+).*?"mascot"\s*:\s*\{\s*"left"\s*:\s*(?<ml>-?[\d.]+)\s*,\s*"top"\s*:\s*(?<mt>-?[\d.]+)\s*,\s*"width"\s*:\s*(?<mw>[\d.]+)\s*,\s*"height"\s*:\s*(?<mh>[\d.]+)'
+        $petMatch = [regex]::Match($text, $petPattern, 'IgnoreCase,Singleline')
+        if ($petMatch.Success) {
+            $result = [pscustomobject]@{
+                Open = ($petMatch.Groups['open'].Value -eq 'true')
+                X = [double]$petMatch.Groups['x'].Value; Y = [double]$petMatch.Groups['y'].Value
+                Width = [double]$petMatch.Groups['w'].Value; Height = [double]$petMatch.Groups['h'].Value
+                MascotLeft = [double]$petMatch.Groups['ml'].Value; MascotTop = [double]$petMatch.Groups['mt'].Value
+                MascotWidth = [double]$petMatch.Groups['mw'].Value; MascotHeight = [double]$petMatch.Groups['mh'].Value
+            }
+            $script:lastValidPetState = $result; $script:lastPetStateStamp = $stamp
+            return $result
+        }
         $state = $text | ConvertFrom-Json
         $petState = $state
         if ($null -eq $state.PSObject.Properties['electron-avatar-overlay-bounds']) {
@@ -516,17 +558,25 @@ function Get-OfficialPetState {
         $bounds = $boundsProperty.Value
         $mascot = $bounds.mascot
         if ($null -eq $mascot) { return $null }
-        return [pscustomobject]@{
+        $result = [pscustomobject]@{
             Open = [bool]$openProperty.Value
             X = [double]$bounds.x; Y = [double]$bounds.y
             Width = [double]$bounds.width; Height = [double]$bounds.height
             MascotLeft = [double]$mascot.left; MascotTop = [double]$mascot.top
             MascotWidth = [double]$mascot.width; MascotHeight = [double]$mascot.height
         }
-    } catch {
-        Write-DiagnosticLog ('Pet state read failed: ' + $_.Exception.Message)
-        return $null
+        $script:lastValidPetState = $result
+        $script:lastPetStateStamp = $stamp
+        return $result
+      } catch {
+        if ($attempt -lt 2) { Start-Sleep -Milliseconds 12; continue }
+        if (([datetime]::Now - $script:lastPetStateFailureLog).TotalSeconds -ge 30) {
+            Write-DiagnosticLog ('Pet state read failed after retries: ' + $_.Exception.Message)
+            $script:lastPetStateFailureLog = [datetime]::Now
+        }
+      }
     }
+    return $script:lastValidPetState
 }
 
 function Format-ResetTime([datetime]$Time) {
@@ -646,6 +696,14 @@ public static class QuotaBuddyWindowProbe
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
+
+    public static void RefreshTopmost(IntPtr hWnd)
+    {
+        SetWindowPos(hWnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040);
+        RedrawWindow(hWnd, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0080 | 0x0100 | 0x0400);
+    }
 
     public static void BeginResize(IntPtr hWnd, int hitTest)
     {
@@ -723,11 +781,11 @@ $strings = if ($Language -eq 'en-US') {
  Width="246" Height="118" MinWidth="80" MinHeight="72" MaxWidth="480" MaxHeight="230" ShowActivated="False"
  WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False"
  ResizeMode="CanResizeWithGrip" Left="1550" Top="680">
- <Grid x:Name="RootGrid" Margin="5">
+ <Grid x:Name="RootGrid" Margin="5" UseLayoutRounding="True" SnapsToDevicePixels="True" RenderOptions.ClearTypeHint="Enabled">
   <Border x:Name="Card" CornerRadius="12" Background="#F4FFFFFF" BorderBrush="#26000000" BorderThickness="1" Padding="8,6,8,6">
    <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.20"/></Border.Effect>
    <Grid>
-     <Grid.RowDefinitions><RowDefinition Height="21"/><RowDefinition Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <Grid.RowDefinitions><RowDefinition x:Name="TitleRow" Height="21"/><RowDefinition x:Name="WeeklyMainRow" Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid x:Name="DragArea" Cursor="SizeAll">
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <Ellipse x:Name="PulseDot" Width="7" Height="7" Fill="#24B36B" Margin="0,0,7,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
@@ -742,19 +800,24 @@ $strings = if ($Language -eq 'en-US') {
       <TextBlock x:Name="WeeklyText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
       <TextBlock x:Name="WeeklyReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
      </Grid>
-     <TextBlock x:Name="CreditDetailsText" Grid.Row="2" Foreground="#656B75" FontSize="8.5" TextWrapping="Wrap" TextAlignment="Center" VerticalAlignment="Center"/>
+     <TextBlock x:Name="CreditDetailsText" Grid.Row="2" Visibility="Collapsed"/>
+     <StackPanel x:Name="CreditDetailsPanel" Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"/>
     <StackPanel x:Name="CompactPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="CompactDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="CompactTitle" FontWeight="SemiBold" FontSize="8" Foreground="#272B31"/></StackPanel>
       <TextBlock x:Name="CompactWeekly" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,2,0,0"/>
       <TextBlock x:Name="CompactWeeklyReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
-     <TextBlock x:Name="CompactCredits" FontSize="7.5" FontWeight="SemiBold" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap" Margin="0,2,0,0"/>
+     <TextBlock x:Name="CompactResetCount" FontSize="7.5" FontWeight="SemiBold" Foreground="#656B75" TextAlignment="Center" HorizontalAlignment="Stretch" Margin="0,2,0,0"/>
+     <TextBlock x:Name="CompactCredits" Visibility="Collapsed"/>
+     <StackPanel x:Name="CompactCreditDetailsPanel" HorizontalAlignment="Center" Margin="0,1,0,0"/>
     </StackPanel>
     <StackPanel x:Name="MediumPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="MediumDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="MediumTitle" FontWeight="SemiBold" FontSize="8.5" Foreground="#272B31"/></StackPanel>
       <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumWeeklyLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumWeeklyText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
       <ProgressBar x:Name="MediumWeeklyBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
       <TextBlock x:Name="MediumWeeklyReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
-     <TextBlock x:Name="MediumCredits" FontSize="7" FontWeight="SemiBold" Foreground="#777D86" TextAlignment="Center" Margin="0,1,0,0"/>
+     <TextBlock x:Name="MediumResetCount" FontSize="7" FontWeight="SemiBold" Foreground="#656B75" TextAlignment="Center" HorizontalAlignment="Stretch" Margin="0,1,0,0"/>
+     <TextBlock x:Name="MediumCredits" Visibility="Collapsed"/>
+     <StackPanel x:Name="MediumCreditDetailsPanel" HorizontalAlignment="Center" Margin="0,1,0,0"/>
     </StackPanel>
    </Grid>
   </Border>
@@ -769,13 +832,83 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 if ($ValidateUI -and $ValidateWidth -gt 0) {
     $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, $ValidateWidth))
 }
-$names = 'RootGrid','Card','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','WeeklyRow','CreditDetailsText','CompactPanel','CompactDot','CompactTitle','CompactWeekly','CompactWeeklyReset','CompactCredits','MediumPanel','MediumDot','MediumTitle','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumCredits','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
+$names = 'RootGrid','Card','TitleRow','WeeklyMainRow','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','WeeklyRow','CreditDetailsText','CreditDetailsPanel','CompactPanel','CompactDot','CompactTitle','CompactWeekly','CompactWeeklyReset','CompactResetCount','CompactCredits','CompactCreditDetailsPanel','MediumPanel','MediumDot','MediumTitle','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumResetCount','MediumCredits','MediumCreditDetailsPanel','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
 $ui = @{}; foreach ($name in $names) { $ui[$name] = $window.FindName($name) }
 $ui.TitleText.Text = $strings.Title
 $ui.WeeklyLabel.Text = $strings.Weekly
 $ui.CompactTitle.Text = $strings.Title
 $ui.MediumTitle.Text = $strings.Title
 $ui.MediumWeeklyLabel.Text = $strings.Weekly
+
+function Refresh-WindowTopmost {
+    if (([datetime]::Now - $script:lastTopmostRefresh).TotalSeconds -lt 2) { return }
+    try {
+        $handle = New-Object Windows.Interop.WindowInteropHelper($window)
+        if ($handle.Handle -ne [intptr]::Zero) {
+            [QuotaBuddyWindowProbe]::RefreshTopmost($handle.Handle)
+            $window.InvalidateVisual()
+            $ui.Card.InvalidateVisual()
+            $script:lastTopmostRefresh = [datetime]::Now
+        }
+    } catch { }
+}
+$window.Add_SourceInitialized({ Refresh-WindowTopmost })
+
+function Update-CreditDetailPanel([double]$FontSize = 8.5, [switch]$Rebuild) {
+    $responsiveFont = [Math]::Max(7.5, [Math]::Min(19.5, 7.5 + (($window.Width - 80.0) * 0.03)))
+    $panelSettings = @(
+        @{ Panel=$ui.CompactCreditDetailsPanel; Width=[Math]::Max(60.0, $window.Width - 20.0); Font=[Math]::Max(6.2, $responsiveFont - 1.6); Compact=$true },
+        @{ Panel=$ui.MediumCreditDetailsPanel; Width=[Math]::Max(100.0, $window.Width - 24.0); Font=[Math]::Max(6.5, $responsiveFont - 1.8); Compact=$true },
+        @{ Panel=$ui.CreditDetailsPanel; Width=[Math]::Max(130.0, [Math]::Min(330.0, $window.Width - 34.0)); Font=$FontSize; Compact=($window.Width -lt 260.0) }
+    )
+    foreach ($setting in $panelSettings) {
+        $panel = $setting.Panel
+        $panel.ClearValue([Windows.FrameworkElement]::WidthProperty)
+        $panel.MaxWidth = $setting.Width
+        [Windows.Controls.Grid]::SetIsSharedSizeScope($panel, $true)
+        $rowFont = $setting.Font
+        if ($Rebuild) {
+            $panel.Children.Clear()
+            foreach ($item in @($script:creditDetailItems)) {
+                $row = New-Object Windows.Controls.Grid
+                $row.Margin = [Windows.Thickness]::new(0, 0.2, 0, 0.2)
+                $row.HorizontalAlignment = 'Center'
+                $leftColumn = New-Object Windows.Controls.ColumnDefinition
+                $leftColumn.Width = [Windows.GridLength]::Auto; $leftColumn.SharedSizeGroup = 'ResetType'
+                $gapColumn = New-Object Windows.Controls.ColumnDefinition
+                $gapColumn.Width = [Windows.GridLength]::new([Math]::Max(5.0, 12.0 * ($rowFont / 8.5)))
+                $rightColumn = New-Object Windows.Controls.ColumnDefinition
+                $rightColumn.Width = [Windows.GridLength]::Auto; $rightColumn.SharedSizeGroup = 'ResetExpiry'
+                [void]$row.ColumnDefinitions.Add($leftColumn); [void]$row.ColumnDefinitions.Add($gapColumn); [void]$row.ColumnDefinitions.Add($rightColumn)
+                $left = New-Object Windows.Controls.TextBlock
+                $left.Text = $item.Type; $left.FontSize = $rowFont; $left.Foreground = '#656B75'; $left.FontWeight = 'SemiBold'; $left.HorizontalAlignment = 'Left'
+                $right = New-Object Windows.Controls.TextBlock
+                $right.Text = if ($setting.Compact) { $item.ExpiryCompact } else { $item.Expiry }
+                $right.Tag = [pscustomobject]@{ Full=$item.Expiry; Compact=$item.ExpiryCompact }
+                $right.FontSize = $rowFont; $right.Foreground = '#656B75'; $right.HorizontalAlignment = 'Right'; $right.TextAlignment = 'Right'
+                [Windows.Controls.Grid]::SetColumn($right, 2)
+                [void]$row.Children.Add($left); [void]$row.Children.Add($right); [void]$panel.Children.Add($row)
+            }
+            if ($panel.Children.Count -eq 0) {
+                $empty = New-Object Windows.Controls.TextBlock
+                $empty.Text = $ui.CreditDetailsText.Text; $empty.FontSize = $rowFont; $empty.Foreground = '#656B75'; $empty.TextAlignment = 'Center'; $empty.HorizontalAlignment = 'Center'
+                [void]$panel.Children.Add($empty)
+            }
+        } else {
+            foreach ($row in @($panel.Children)) {
+                if ($row -is [Windows.Controls.Panel]) {
+                    foreach ($child in @($row.Children)) {
+                        $child.FontSize = $rowFont
+                        if ($null -ne $child.Tag -and $null -ne $child.Tag.PSObject.Properties['Full']) {
+                            $child.Text = if ($setting.Compact) { $child.Tag.Compact } else { $child.Tag.Full }
+                        }
+                    }
+                }
+                elseif ($row -is [Windows.Controls.TextBlock]) { $row.FontSize = $rowFont }
+            }
+        }
+    }
+}
 
 function Update-Display {
     $data = Get-QuotaData -Path $DataFile
@@ -786,9 +919,13 @@ function Update-Display {
         $ui.CompactWeekly.Text = $strings.Weekly + ' --'
         $ui.CompactWeeklyReset.Text = $strings.Unavailable
         $ui.CompactCredits.Text = $strings.Unavailable
+        $ui.CompactResetCount.Text = ''
         $ui.MediumWeeklyText.Text = '--'; $ui.MediumWeeklyReset.Text = $strings.Unavailable
         $ui.MediumCredits.Text = $strings.Unavailable
+        $ui.MediumResetCount.Text = ''
         $ui.CreditDetailsText.Text = $strings.Unavailable
+        $script:creditDetailItems = @()
+        Update-CreditDetailPanel -Rebuild
         $ui.MediumWeeklyBar.Value = 0
         $ui.Card.ToolTip = $data.Message
         $ui.WeeklyBar.Value = 0
@@ -803,6 +940,7 @@ function Update-Display {
     $ui.WeeklyBar.Value = $weeklyValue
     $ui.Card.ToolTip = $null
     $creditDetailLines = @()
+    $creditDetailItems = @()
     $creditCountText = $strings.Credits + ' --'
     if ($null -ne $data.PSObject.Properties['ResetCredits'] -and $null -ne $data.ResetCredits) {
         $ui.ResetCountText.Text = if ($Language -eq 'en-US') { "$($data.ResetCredits)x · " } else { "$($data.ResetCredits)次 · " }
@@ -813,17 +951,21 @@ function Update-Display {
                 $typeText = if ([string]$credit.Type -eq 'Full reset') { $strings.CreditType } else { [string]$credit.Type }
                 $expiryText = if ($Language -eq 'en-US') { ([datetime]$credit.ExpiresAt).ToString('MMM d HH:mm', [Globalization.CultureInfo]::GetCultureInfo('en-US')) } else { ([datetime]$credit.ExpiresAt).ToString('M月d日 HH:mm') }
                 $creditDetailLines += ('{0} · {1} {2}' -f $typeText, $strings.Expires, $expiryText)
+                $creditDetailItems += [pscustomobject]@{ Type = $typeText; Expiry = ($strings.Expires + ' ' + $expiryText); ExpiryCompact = $expiryText }
             }
         }
     }
     $wideCreditText = if ($creditDetailLines.Count -gt 0) { $creditDetailLines -join [Environment]::NewLine } elseif ($data.ResetCredits -eq 0) { $strings.NoCredits } else { $strings.CreditDetailsUnavailable }
-    $compactCreditLines = @($creditCountText) + @($creditDetailLines)
-    $compactCreditText = $compactCreditLines -join [Environment]::NewLine
+    $compactCreditText = $creditDetailLines -join [Environment]::NewLine
     $script:creditDetailLineCount = [Math]::Max(1, $creditDetailLines.Count)
     $script:wideCreditLines = if ($creditDetailLines.Count -gt 0) { @($creditDetailLines) } else { @($wideCreditText) }
+    $script:creditDetailItems = @($creditDetailItems)
     $ui.CreditDetailsText.Text = $wideCreditText
+    $ui.CompactResetCount.Text = $creditCountText
+    $ui.MediumResetCount.Text = $creditCountText
     $ui.CompactCredits.Text = $compactCreditText
     $ui.MediumCredits.Text = $compactCreditText
+    Update-CreditDetailPanel -Rebuild
     $ui.WeeklyText.Text = $weeklyDisplay; $ui.WeeklyReset.Text = $weeklyResetText
     $ui.CompactWeekly.Text = $strings.Weekly + ' ' + $weeklyDisplay
     $ui.CompactWeeklyReset.Text = $weeklyResetText
@@ -970,11 +1112,16 @@ function Sync-WithOfficialPet {
     # Electron 保存的是与 WPF 一致的桌面逻辑坐标，不应再次按 DPI 缩放转换。
     $petCenterX = $pet.X + $pet.MascotLeft + ($pet.MascotWidth / 2.0)
     $petBottomY = $pet.Y + $pet.MascotTop + $pet.MascotHeight + 4.0
+    $targetLeft = [Math]::Round($petCenterX - ($window.Width / 2.0), 1)
+    $targetTop = [Math]::Round($petBottomY, 1)
     $script:positioningForPet = $true
     try {
-        $window.Left = $petCenterX - ($window.Width / 2.0)
-        $window.Top = $petBottomY
-        Move-WindowIntoVirtualDesktop
+        # Ignore sub-pixel noise and avoid forcing a redraw when nothing moved.
+        if ([Math]::Abs($window.Left - $targetLeft) -ge 0.75 -or [Math]::Abs($window.Top - $targetTop) -ge 0.75) {
+            $window.Left = $targetLeft
+            $window.Top = $targetTop
+            Move-WindowIntoVirtualDesktop
+        }
     } finally {
         $script:positioningForPet = $false
     }
@@ -1001,6 +1148,7 @@ function Update-WindowPresence {
         Save-WindowPlacement
     }
     if (-not $window.IsVisible) { $window.Show() }
+    Refresh-WindowTopmost
 }
 
 $menu = New-Object Windows.Controls.ContextMenu
@@ -1049,85 +1197,62 @@ function Update-ResponsiveLayout {
         $currentWidth = if ($window.ActualWidth -gt 0) { $window.ActualWidth } else { $window.Width }
         $ultraCompact = ($currentWidth -lt 120)
         $mediumCompact = ($currentWidth -ge 120 -and $currentWidth -lt 185)
+        $responsiveFont = [Math]::Max(7.5, [Math]::Min(19.5, 7.5 + (($currentWidth - 80.0) * 0.03)))
         if ($ultraCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsText.Visibility = 'Collapsed'
-            $ui.CompactPanel.Visibility = 'Visible'
-            $ui.MediumPanel.Visibility = 'Collapsed'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(1)
-            $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = [Math]::Max(7.5, [Math]::Min(9.5, 7.5 + (($currentWidth - 80.0) / 40.0)))
-            $ui.CompactTitle.FontSize = $fontSize
-            $ui.CompactWeekly.FontSize = $fontSize
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
+            $ui.CompactPanel.Visibility = 'Visible'; $ui.MediumPanel.Visibility = 'Collapsed'
+            $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
+            $fontSize = $responsiveFont
+            $ui.CompactTitle.FontSize = $fontSize; $ui.CompactWeekly.FontSize = $fontSize
             $ui.CompactWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
-            $ui.CompactCredits.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
+            $ui.CompactResetCount.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
+            Update-CreditDetailPanel -FontSize 8.5
             $availableWidth = [Math]::Max(60.0, $currentWidth - 10.0)
             $ui.CompactPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
-            $targetHeight = [Math]::Ceiling($ui.CompactPanel.DesiredSize.Height + 10.0)
-            $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, $targetHeight))
+            $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.CompactPanel.DesiredSize.Height + 10.0)))
         } elseif ($mediumCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsText.Visibility = 'Collapsed'
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Visible'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(1)
-            $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = [Math]::Max(8.0, [Math]::Min(10.0, 8.0 + (($currentWidth - 120.0) / 65.0)))
-            $ui.MediumTitle.FontSize = $fontSize + 0.5
-            $ui.MediumWeeklyLabel.FontSize = $fontSize
-            $ui.MediumWeeklyText.FontSize = $fontSize
+            $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
+            $fontSize = $responsiveFont
+            $ui.MediumTitle.FontSize = $fontSize + 0.5; $ui.MediumWeeklyLabel.FontSize = $fontSize; $ui.MediumWeeklyText.FontSize = $fontSize
             $ui.MediumWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
-            $ui.MediumCredits.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
+            $ui.MediumResetCount.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
+            Update-CreditDetailPanel -FontSize 8.5
             $availableWidth = [Math]::Max(100.0, $currentWidth - 10.0)
             $ui.MediumPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
-            $targetHeight = [Math]::Ceiling($ui.MediumPanel.DesiredSize.Height + 10.0)
-            $targetHeight = [Math]::Max(82.0, [Math]::Min($window.MaxHeight, $targetHeight))
+            $targetHeight = [Math]::Max(82.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.MediumPanel.DesiredSize.Height + 10.0)))
         } else {
-            $ui.DragArea.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsText.Visibility = 'Visible'
+            $ui.DragArea.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsPanel.Visibility = 'Visible'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Collapsed'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(5)
-            $ui.Card.Padding = [Windows.Thickness]::new(8,6,8,6)
-            if ($currentWidth -lt 220) {
-                $ui.TitleText.FontSize = 10
-                $ui.Updated.FontSize = 7; $ui.ResetCountText.FontSize = 7
-                $ui.PulseDot.Width = 5; $ui.PulseDot.Height = 5; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,4,0)
-                $ui.WeeklyLabel.FontSize = 10
-                $ui.WeeklyText.FontSize = 11
-                $ui.WeeklyReset.FontSize = 8; $ui.CreditDetailsText.FontSize = 7.5
-            } else {
-                $ui.TitleText.FontSize = 12
-                $ui.Updated.FontSize = 9; $ui.ResetCountText.FontSize = 9
-                $ui.PulseDot.Width = 7; $ui.PulseDot.Height = 7; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,7,0)
-                $ui.WeeklyLabel.FontSize = 11.5
-                $ui.WeeklyText.FontSize = 12
-                $ui.WeeklyReset.FontSize = 9; $ui.CreditDetailsText.FontSize = 8.5
-            }
-            if ($currentWidth -ge 330 -and $script:wideCreditLines.Count -gt 1) {
-                $ui.CreditDetailsText.Text = $script:wideCreditLines -join '    '
-                $effectiveCreditLines = 1
-            } else {
-                $ui.CreditDetailsText.Text = $script:wideCreditLines -join [Environment]::NewLine
-                $effectiveCreditLines = $script:creditDetailLineCount
-            }
-            $targetHeight = [Math]::Min($window.MaxHeight, 82.0 + (13.0 * $effectiveCreditLines))
+            $ui.RootGrid.Margin = [Windows.Thickness]::new(5); $ui.Card.Padding = [Windows.Thickness]::new(8,6,8,6)
+            $scale = $responsiveFont / 12.0
+            $ui.TitleText.FontSize = 12.0 * $scale
+            $ui.Updated.FontSize = 9.0 * $scale; $ui.ResetCountText.FontSize = 9.0 * $scale
+            $dotSize = 7.0 * $scale
+            $ui.PulseDot.Width = $dotSize; $ui.PulseDot.Height = $dotSize; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,7.0 * $scale,0)
+            $ui.WeeklyLabel.FontSize = 11.5 * $scale; $ui.WeeklyText.FontSize = 12.0 * $scale
+            $ui.WeeklyReset.FontSize = 9.0 * $scale; $ui.CreditDetailsText.FontSize = 8.5 * $scale
+            $ui.TitleRow.Height = [Windows.GridLength]::new(21.0 * $scale); $ui.WeeklyMainRow.Height = [Windows.GridLength]::new(30.0 * $scale)
+            $effectiveCreditLines = $script:creditDetailLineCount
+            Update-CreditDetailPanel -FontSize (8.5 * $scale)
+            $targetHeight = [Math]::Min($window.MaxHeight, 18.0 + (51.0 * $scale) + (13.0 * $scale * $effectiveCreditLines))
         }
-        # 记录恰好容纳内容的高度；拖动停止后窗口会自动收紧到这个高度。
         $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($targetHeight)))
-        $window.MinHeight = $targetHeight
-        $script:targetContentHeight = $targetHeight
+        $window.MinHeight = $targetHeight; $script:targetContentHeight = $targetHeight
         if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
-    } finally {
-        $script:adjustingResponsiveSize = $false
-    }
+    } finally { $script:adjustingResponsiveSize = $false }
 }
 $resizeSettleTimer = New-Object Windows.Threading.DispatcherTimer
 $resizeSettleTimer.Interval = [TimeSpan]::FromMilliseconds(220)
 $resizeSettleTimer.Add_Tick({
     $resizeSettleTimer.Stop()
-    if ([Math]::Abs($window.Height - $script:targetContentHeight) -gt 0.5) {
-        $window.Height = $script:targetContentHeight
-    }
+    if ([Math]::Abs($window.Height - $script:targetContentHeight) -gt 0.5) { $window.Height = $script:targetContentHeight }
     Save-WindowPlacement
 })
 $window.Add_SizeChanged({
     Update-ResponsiveLayout
+    Refresh-WindowTopmost
     $resizeSettleTimer.Stop()
     $resizeSettleTimer.Start()
 })
@@ -1160,7 +1285,7 @@ $window.Add_Closed({
     [Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
 })
 $timer = New-Object Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds(500)
+$timer.Interval = [TimeSpan]::FromMilliseconds(100)
 $timer.Add_Tick({
     $requestedLanguage = $null
     foreach ($candidateLanguage in @('zh-CN', 'en-US')) {
@@ -1182,6 +1307,7 @@ $timer.Add_Tick({
 })
 $timer.Start()
 if (-not $ValidateUI) { Restore-WindowPlacement }
+if (-not $ValidateUI) { Update-WindowPresence }
 Update-Display
 if ($ValidateUI) {
     $window.Height = $script:targetContentHeight
@@ -1189,10 +1315,14 @@ if ($ValidateUI) {
     Write-Output ('COLOR=' + $ui.PulseDot.Fill.ToString())
     Write-Output ('WEEKLY_COLOR=' + $ui.WeeklyText.Foreground.ToString())
     Write-Output ('WEEKLY_BAR_COLOR=' + $ui.WeeklyBar.Foreground.ToString())
+    Write-Output ('TRANSPARENT_WINDOW=' + $window.AllowsTransparency)
     Write-Output ('RESET_WEIGHT=' + $ui.ResetCountText.FontWeight.ToString())
     Write-Output ('WEEKLY_RESET=' + $ui.WeeklyReset.Text)
     Write-Output ('CREDIT_DETAILS=' + ($ui.CreditDetailsText.Text -replace [Environment]::NewLine, ' | '))
     $layoutName = if ($ui.CompactPanel.Visibility -eq 'Visible') { 'compact' } elseif ($ui.MediumPanel.Visibility -eq 'Visible') { 'medium' } else { 'wide' }
+    $visibleFont = if ($layoutName -eq 'compact') { $ui.CompactTitle.FontSize } elseif ($layoutName -eq 'medium') { $ui.MediumTitle.FontSize } else { $ui.TitleText.FontSize }
+    $resetAlignment = if ($layoutName -eq 'compact') { $ui.CompactResetCount.TextAlignment } elseif ($layoutName -eq 'medium') { $ui.MediumResetCount.TextAlignment } else { 'TwoColumn' }
+    Write-Output ('VISIBLE_FONT={0:0.0};RESET_ALIGNMENT={1}' -f $visibleFont, $resetAlignment)
     Write-Output ('LAYOUT={0};WIDTH={1};HEIGHT={2}' -f $layoutName, [Math]::Round($window.Width), [Math]::Round($window.Height))
     $window.Close()
     exit
