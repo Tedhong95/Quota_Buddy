@@ -2,6 +2,9 @@
     [switch]$Once,
     [switch]$ValidateUI,
     [double]$ValidateWidth = 0,
+    [string]$ValidateTheme = '',
+    [string]$ValidateHexColor = '',
+    [switch]$ValidateCustomDialog,
     [switch]$ValidatePositioning,
     [string]$PetStateFile = '',
     [double]$ValidatePanelWidth = 160,
@@ -45,6 +48,7 @@ $script:lastMascotWidth = $null
 $script:globalStatePath = Join-Path $env:USERPROFILE '.codex\.codex-global-state.json'
 if (-not [string]::IsNullOrWhiteSpace($PetStateFile)) { $script:globalStatePath = $PetStateFile }
 $script:windowPlacementPath = Join-Path $env:USERPROFILE '.codex\quota-buddy-window.json'
+$script:appearancePath = Join-Path $env:USERPROFILE '.codex\quota-buddy-appearance.json'
 $script:diagnosticLogPath = Join-Path $env:USERPROFILE '.codex\quota-buddy.log'
 $script:quotaBuddyScriptPath = $PSCommandPath
 $script:singleInstanceMutex = $null
@@ -62,6 +66,7 @@ $script:lastTopmostRefresh = [datetime]::MinValue
 $script:lastValidPetState = $null
 $script:lastPetStateFailureLog = [datetime]::MinValue
 $script:lastPetStateStamp = $null
+$script:followPetEnabled = $FollowPet
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -176,7 +181,7 @@ function Get-LogQuotaData {
         # WAL 和主库都可能包含最近记录，统一收集后再按记录新旧程度选择。
         $allResults = @()
         foreach ($candidatePath in @(($Path + '-wal'), $Path)) {
-            $readBytes = if ($candidatePath.EndsWith('-wal')) { 8388608 } else { 134217728 }
+            $readBytes = if ($candidatePath.EndsWith('-wal')) { 8388608 } else { 16777216 }
             $text = Read-TailText -Path $candidatePath -MaxBytes $readBytes
             if ([string]::IsNullOrEmpty($text)) { continue }
             # SQLite 中的事件正文有时以转义 JSON 字符串保存，先还原引号和换行。
@@ -272,7 +277,10 @@ function Get-CodexRateLimitObject {
         $byId = $Result.rateLimitsByLimitId
         if ($null -ne $byId.PSObject.Properties['codex']) { return $byId.codex }
         foreach ($property in $byId.PSObject.Properties) {
-            if ($null -ne $property.Value.primary -and $null -ne $property.Value.secondary) { return $property.Value }
+            if ($null -eq $property.Value) { continue }
+            $primaryProperty = $property.Value.PSObject.Properties['primary']
+            $secondaryProperty = $property.Value.PSObject.Properties['secondary']
+            if (($null -ne $primaryProperty -and $null -ne $primaryProperty.Value) -or ($null -ne $secondaryProperty -and $null -ne $secondaryProperty.Value)) { return $property.Value }
         }
     }
     return $null
@@ -281,10 +289,15 @@ function Get-CodexRateLimitObject {
 function Find-CodexExecutable {
     function Get-LaunchableCodexPath([string]$Path) {
         if ($Path -notlike '*\WindowsApps\*') { return $Path }
-        $copyPath = Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-codex-{0}.exe' -f $PID)
-        Copy-Item -LiteralPath $Path -Destination $copyPath -Force
-        $script:officialExecutableCopy = $copyPath
-        return $copyPath
+        $source = Get-Item -LiteralPath $Path
+        $cachePath = Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-codex-{0}-{1}.exe' -f $source.Length,$source.LastWriteTimeUtc.Ticks)
+        if (-not (Test-Path -LiteralPath $cachePath)) {
+            $reusable = Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'quota-buddy-codex-*.exe' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Length -eq $source.Length } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($null -ne $reusable) { return $reusable.FullName }
+            Copy-Item -LiteralPath $Path -Destination $cachePath -Force
+        }
+        return $cachePath
     }
     if (-not [string]::IsNullOrWhiteSpace($CodexPath) -and (Test-Path -LiteralPath $CodexPath)) { return $CodexPath }
     foreach ($name in @('codex.exe', 'codex')) {
@@ -322,7 +335,7 @@ function Start-OfficialClient {
         $psi.UseShellExecute = $false
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardError = $false
         $psi.CreateNoWindow = $true
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $psi
@@ -339,12 +352,12 @@ function Start-OfficialClient {
     if (-not $started -or $null -eq $process) { throw 'Unable to start Codex quota service' }
     $script:officialProcess = $process
 
-    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.2.1' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
+    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.4.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
     $process.StandardInput.WriteLine($initialize)
     $process.StandardInput.Flush()
     $initialized = $false
     for ($i=0; $i -lt 6; $i++) {
-        $line = Read-OfficialLine -TimeoutMs 10000
+        $line = Read-OfficialLine -TimeoutMs 15000
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try { $message = $line | ConvertFrom-Json } catch { continue }
         if ($null -eq $message.PSObject.Properties['id']) { continue }
@@ -363,15 +376,19 @@ function Get-OfficialQuotaData {
     $script:officialProcess.StandardInput.WriteLine($request)
     $script:officialProcess.StandardInput.Flush()
     for ($i=0; $i -lt 8; $i++) {
-        $line = Read-OfficialLine -TimeoutMs 10000
+        $line = Read-OfficialLine -TimeoutMs 15000
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         try { $message = $line | ConvertFrom-Json } catch { continue }
         if ($null -eq $message.PSObject.Properties['id'] -or $message.id -ne $requestId) { continue }
         if ($null -ne $message.PSObject.Properties['error'] -and $null -ne $message.error) { throw [string]$message.error.message }
         if ($null -eq $message.PSObject.Properties['result']) { continue }
         $rate = Get-CodexRateLimitObject -Result $message.result
-        if ($null -eq $rate -or $null -eq $rate.primary) { throw 'Official quota response was incomplete' }
-        $limits = @($rate.primary, $rate.secondary) | Where-Object { $null -ne $_ }
+        if ($null -eq $rate) { throw 'Official quota response was incomplete' }
+        $primaryProperty = $rate.PSObject.Properties['primary']; $secondaryProperty = $rate.PSObject.Properties['secondary']
+        $primaryValue = if ($null -ne $primaryProperty) { $primaryProperty.Value } else { $null }
+        $secondaryValue = if ($null -ne $secondaryProperty) { $secondaryProperty.Value } else { $null }
+        $limits = @(@($primaryValue, $secondaryValue) | Where-Object { $null -ne $_ })
+        if ($limits.Count -eq 0) { throw 'Official quota response was incomplete' }
         $primaryLimit = $limits | Where-Object { [int]$_.windowDurationMins -le 360 } | Select-Object -First 1
         $secondaryLimit = $limits | Where-Object { [int]$_.windowDurationMins -ge 10000 } | Select-Object -First 1
         # 兼容旧版“5 小时 + 每周”和新版仅返回每周额度的响应。
@@ -420,7 +437,7 @@ function Get-UsagePanelQuotaData {
     try {
         Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes -ErrorAction Stop
         $texts = New-Object Collections.Generic.List[string]
-        $windowHandles = Get-Process -Name ChatGPT,Codex -ErrorAction SilentlyContinue |
+        $windowHandles = Get-Process -Name ChatGPT,Codex,OpenAI.ChatGPT,OpenAI.Codex -ErrorAction SilentlyContinue |
             Where-Object { $_.MainWindowHandle -ne 0 } |
             Select-Object -ExpandProperty MainWindowHandle -Unique
         foreach ($windowHandle in $windowHandles) {
@@ -436,15 +453,15 @@ function Get-UsagePanelQuotaData {
         if ([string]::IsNullOrWhiteSpace($text)) { return $null }
         $five = [regex]::Match($text, '5\s*小时使用限制.*?剩余\s*(?<remaining>\d{1,3})%.*?将于\s*(?<reset>\d{1,2}月\d{1,2}日\s*\d{1,2}:\d{2})\s*重置', 'Singleline')
         $week = [regex]::Match($text, '每周使用限额.*?剩余\s*(?<remaining>\d{1,3})%.*?将于\s*(?<reset>\d{1,2}月\d{1,2}日(?:\s*\d{1,2}:\d{2})?)\s*重置', 'Singleline')
-        if (-not $five.Success -or -not $week.Success) { return $null }
+        if (-not $week.Success) { return $null }
         $weekReset = $week.Groups['reset'].Value
         if ($weekReset -notmatch '\d{1,2}:\d{2}$') { $weekReset += ' 00:00' }
         $credits = [regex]::Match($text, '可用\s*(?<count>\d+)\s*次')
         return [pscustomobject]@{
             Available = $true
-            PrimaryRemaining = [int]$five.Groups['remaining'].Value
+            PrimaryRemaining = if ($five.Success) { [int]$five.Groups['remaining'].Value } else { $null }
             SecondaryRemaining = [int]$week.Groups['remaining'].Value
-            PrimaryResetAt = Convert-UsagePanelResetTime $five.Groups['reset'].Value
+            PrimaryResetAt = if ($five.Success) { Convert-UsagePanelResetTime $five.Groups['reset'].Value } else { $null }
             SecondaryResetAt = Convert-UsagePanelResetTime $weekReset
             ObservedAt = [datetime]::Now
             ResetCredits = if ($credits.Success) { [int]$credits.Groups['count'].Value } else { $null }
@@ -521,12 +538,29 @@ function Ensure-AutoStart {
 function Get-OfficialPetState {
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
       try {
-        $item = Get-Item -LiteralPath $script:globalStatePath
+        $petStatePath = $script:globalStatePath
+        if (-not (Test-Path -LiteralPath $petStatePath) -and [string]::IsNullOrWhiteSpace($PetStateFile)) {
+            $knownPaths = @(
+                (Join-Path $env:APPDATA 'ChatGPT\.codex-global-state.json'),
+                (Join-Path $env:APPDATA 'OpenAI\ChatGPT\.codex-global-state.json'),
+                (Join-Path $env:LOCALAPPDATA 'ChatGPT\.codex-global-state.json')
+            )
+            $packagesFolder = Join-Path $env:LOCALAPPDATA 'Packages'
+            if (Test-Path -LiteralPath $packagesFolder) {
+                foreach ($packageFolder in @(Get-ChildItem -LiteralPath $packagesFolder -Directory -Filter 'OpenAI.*' -ErrorAction SilentlyContinue)) {
+                    $knownPaths += Join-Path $packageFolder.FullName 'LocalState\.codex-global-state.json'
+                    $knownPaths += Join-Path $packageFolder.FullName 'LocalCache\Roaming\ChatGPT\.codex-global-state.json'
+                }
+            }
+            $alternate = $knownPaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if ($null -ne $alternate) { $petStatePath = $alternate; $script:globalStatePath = $alternate }
+        }
+        $item = Get-Item -LiteralPath $petStatePath
         $stamp = '{0}:{1}' -f $item.Length, $item.LastWriteTimeUtc.Ticks
         if ($script:lastPetStateStamp -eq $stamp -and $null -ne $script:lastValidPetState) {
             return $script:lastValidPetState
         }
-        $stream = [IO.File]::Open($script:globalStatePath, 'Open', 'Read', 'ReadWrite,Delete')
+        $stream = [IO.File]::Open($petStatePath, 'Open', 'Read', 'ReadWrite,Delete')
         try {
             $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8, $true)
             try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
@@ -546,6 +580,50 @@ function Get-OfficialPetState {
             $script:lastValidPetState = $result; $script:lastPetStateStamp = $stamp
             return $result
         }
+        # Unified ChatGPT desktop stores the live x/y at the overlay root while
+        # keeping mascot dimensions in per-display templates. Combine them.
+        $searchText = $text
+        if ($searchText -notmatch '"electron-avatar-overlay-open"' -and $searchText -match '\\"electron-avatar-overlay-open\\"') {
+            $searchText = $searchText -replace '\\"', '"'
+        }
+        $overlayPattern = '"electron-avatar-overlay-open"\s*:\s*(?<open>true|false).*?"electron-avatar-overlay-bounds"\s*:\s*\{\s*"x"\s*:\s*(?<x>-?[\d.]+)\s*,\s*"y"\s*:\s*(?<y>-?[\d.]+)(?<header>.*?)"byDisplayId"'
+        $overlayMatch = [regex]::Match($searchText, $overlayPattern, 'IgnoreCase,Singleline')
+        if ($overlayMatch.Success) {
+            $displayMatch = [regex]::Match($overlayMatch.Groups['header'].Value, '"displayId"\s*:\s*(?<display>\d+)', 'IgnoreCase')
+            if ($displayMatch.Success) {
+                $displayId = [regex]::Escape($displayMatch.Groups['display'].Value)
+                $anchorPattern = '"' + $displayId + '"\s*:\s*\{\s*"x"\s*:\s*-?[\d.]+\s*,\s*"y"\s*:\s*-?[\d.]+\s*,(?:\s*"width"\s*:\s*[\d.]+\s*,\s*"height"\s*:\s*[\d.]+\s*,)?\s*"anchor"\s*:\s*\{\s*"x"\s*:\s*(?<x>-?[\d.]+)\s*,\s*"y"\s*:\s*(?<y>-?[\d.]+)\s*,\s*"width"\s*:\s*(?<w>[\d.]+)\s*,\s*"height"\s*:\s*(?<h>[\d.]+)'
+                $anchorMatch = [regex]::Match($searchText, $anchorPattern, 'IgnoreCase,Singleline')
+                if ($anchorMatch.Success) {
+                    $result = [pscustomobject]@{
+                        Open = ($overlayMatch.Groups['open'].Value -eq 'true')
+                        X = [double]$anchorMatch.Groups['x'].Value; Y = [double]$anchorMatch.Groups['y'].Value
+                        Width = [double]$anchorMatch.Groups['w'].Value; Height = [double]$anchorMatch.Groups['h'].Value
+                        MascotLeft = 0.0; MascotTop = 0.0
+                        MascotWidth = [double]$anchorMatch.Groups['w'].Value; MascotHeight = [double]$anchorMatch.Groups['h'].Value
+                    }
+                    $script:lastValidPetState = $result; $script:lastPetStateStamp = $stamp
+                    return $result
+                }
+            }
+            $placementMatch = [regex]::Match($overlayMatch.Groups['header'].Value, '"placement"\s*:\s*"(?<placement>[^"]+)"', 'IgnoreCase')
+            $placement = if ($placementMatch.Success) { $placementMatch.Groups['placement'].Value } else { '' }
+            $templatePattern = '"(?<id>\d+)"\s*:\s*\{\s*"x"\s*:\s*-?[\d.]+\s*,\s*"y"\s*:\s*-?[\d.]+\s*,\s*"width"\s*:\s*(?<w>[\d.]+)\s*,\s*"height"\s*:\s*(?<h>[\d.]+).*?"mascot"\s*:\s*\{\s*"left"\s*:\s*(?<ml>-?[\d.]+)\s*,\s*"top"\s*:\s*(?<mt>-?[\d.]+)\s*,\s*"width"\s*:\s*(?<mw>[\d.]+)\s*,\s*"height"\s*:\s*(?<mh>[\d.]+)\s*\}\s*,\s*"placement"\s*:\s*"(?<placement>[^"]+)"'
+            $templates = [regex]::Matches($searchText, $templatePattern, 'IgnoreCase,Singleline')
+            $template = if (-not [string]::IsNullOrWhiteSpace($placement)) { $templates | Where-Object { $_.Groups['placement'].Value -eq $placement } | Select-Object -First 1 } else { $null }
+            if ($null -eq $template -and $templates.Count -gt 0) { $template = $templates[0] }
+            $mascotWidth = if ($null -ne $template) { [double]$template.Groups['mw'].Value } else { 80.0 }
+            $mascotHeight = if ($null -ne $template) { [double]$template.Groups['mh'].Value } else { 87.0 }
+            $result = [pscustomobject]@{
+                Open = ($overlayMatch.Groups['open'].Value -eq 'true')
+                X = [double]$overlayMatch.Groups['x'].Value; Y = [double]$overlayMatch.Groups['y'].Value
+                Width = $mascotWidth; Height = $mascotHeight
+                MascotLeft = 0.0; MascotTop = 0.0
+                MascotWidth = $mascotWidth; MascotHeight = $mascotHeight
+            }
+            $script:lastValidPetState = $result; $script:lastPetStateStamp = $stamp
+            return $result
+        }
         $state = $text | ConvertFrom-Json
         $petState = $state
         if ($null -eq $state.PSObject.Properties['electron-avatar-overlay-bounds']) {
@@ -556,8 +634,9 @@ function Get-OfficialPetState {
         $boundsProperty = $petState.PSObject.Properties['electron-avatar-overlay-bounds']
         if ($null -eq $openProperty -or $null -eq $boundsProperty -or $null -eq $boundsProperty.Value) { return $null }
         $bounds = $boundsProperty.Value
-        $mascot = $bounds.mascot
-        if ($null -eq $mascot) { return $null }
+        $mascotProperty = $bounds.PSObject.Properties['mascot']
+        if ($null -eq $mascotProperty -or $null -eq $mascotProperty.Value) { return $null }
+        $mascot = $mascotProperty.Value
         $result = [pscustomobject]@{
             Open = [bool]$openProperty.Value
             X = [double]$bounds.x; Y = [double]$bounds.y
@@ -699,6 +778,17 @@ public static class QuotaBuddyWindowProbe
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
 
+    private static bool IsSupportedDesktopProcess(Process process)
+    {
+        try {
+            string name = process.ProcessName;
+            return String.Equals(name, "Codex", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(name, "ChatGPT", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(name, "OpenAI.Codex", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(name, "OpenAI.ChatGPT", StringComparison.OrdinalIgnoreCase);
+        } catch { return false; }
+    }
+
     public static void RefreshTopmost(IntPtr hWnd)
     {
         SetWindowPos(hWnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040);
@@ -721,8 +811,9 @@ public static class QuotaBuddyWindowProbe
             GetWindowThreadProcessId(hWnd, out pid);
             if (pid == currentPid) return true;
             try {
-                string processName = Process.GetProcessById((int)pid).ProcessName;
-                if (!String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase) && !String.Equals(processName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) return true;
+                using (Process process = Process.GetProcessById((int)pid)) {
+                    if (!IsSupportedDesktopProcess(process)) return true;
+                }
             } catch { return true; }
             RECT rect;
             if (!GetWindowRect(hWnd, out rect)) return true;
@@ -747,8 +838,9 @@ public static class QuotaBuddyWindowProbe
             GetWindowThreadProcessId(hWnd, out pid);
             if (pid == currentPid) return true;
             try {
-                string processName = Process.GetProcessById((int)pid).ProcessName;
-                if (String.Equals(processName, "Codex", StringComparison.OrdinalIgnoreCase) || String.Equals(processName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) windows.Add(hWnd);
+                using (Process process = Process.GetProcessById((int)pid)) {
+                    if (IsSupportedDesktopProcess(process)) windows.Add(hWnd);
+                }
             } catch { }
             return true;
         }, IntPtr.Zero);
@@ -759,7 +851,7 @@ public static class QuotaBuddyWindowProbe
     {
         foreach (Process process in Process.GetProcesses()) {
             try {
-                if (String.Equals(process.ProcessName, "Codex", StringComparison.OrdinalIgnoreCase) || String.Equals(process.ProcessName, "ChatGPT", StringComparison.OrdinalIgnoreCase)) {
+                if (IsSupportedDesktopProcess(process)) {
                     return true;
                 }
             } catch { }
@@ -771,9 +863,9 @@ public static class QuotaBuddyWindowProbe
 }
 
 $strings = if ($Language -eq 'en-US') {
-    @{ Title='Codex quota'; Weekly='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; ResetAt='reset'; Credits='available resets'; CreditType='Full reset'; Expires='expires'; NoCredits='No reset credits'; CreditDetailsUnavailable='Reset details unavailable' }
+    @{ Title='Codex quota'; Weekly='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; ResetAt='reset'; Credits='available resets'; CreditType='Full reset'; Expires='expires'; NoCredits='No reset credits'; CreditDetailsUnavailable='Reset details unavailable'; Colors='Panel color'; DefaultColor='Restore default'; CustomColor='Custom color...'; HexPrompt='Choose a color or enter a HEX color'; ChooseColor='Choose color'; Confirm='Apply'; Cancel='Cancel'; InvalidHex='Please enter a valid 6-digit HEX color'; FollowPet='Follow pet'; BlackColor='Black' }
 } else {
-    @{ Title='Codex额度'; Weekly='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; ResetAt='重置'; Credits='可用重置'; CreditType='全额重置'; Expires='到期'; NoCredits='暂无可用重置'; CreditDetailsUnavailable='重置详情暂不可用' }
+    @{ Title='Codex额度'; Weekly='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; ResetAt='重置'; Credits='可用重置'; CreditType='全额重置'; Expires='到期'; NoCredits='暂无可用重置'; CreditDetailsUnavailable='重置详情暂不可用'; Colors='显示颜色'; DefaultColor='恢复默认'; CustomColor='自定义颜色...'; HexPrompt='请选择颜色或直接输入 HEX 色号'; ChooseColor='选择颜色'; Confirm='应用'; Cancel='取消'; InvalidHex='请输入有效的 6 位 HEX 色号'; FollowPet='跟随宠物'; BlackColor='黑色' }
 }
 
 [xml]$xaml = @'
@@ -840,6 +932,98 @@ $ui.CompactTitle.Text = $strings.Title
 $ui.MediumTitle.Text = $strings.Title
 $ui.MediumWeeklyLabel.Text = $strings.Weekly
 
+function New-ThemeBrush([string]$Color) {
+    return [Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+}
+
+function ConvertTo-HexColor([string]$Value) {
+    $normalized = $Value.Trim().ToUpperInvariant()
+    if ($normalized -notmatch '^#') { $normalized = '#' + $normalized }
+    if ($normalized -match '^#[0-9A-F]{6}$') { return $normalized }
+    return $null
+}
+
+function Get-ThemePalette([string]$Theme, [string]$CustomColor = '') {
+    $palettes = @{
+        default  = @{ Background='#F4FFFFFF'; Border='#26000000'; Primary='#272B31'; Secondary='#353A42'; Muted='#656B75'; Soft='#858B95'; Track='#E4E7EA'; IsDark=$false }
+    }
+    if ($Theme -ne 'custom' -and $palettes.ContainsKey($Theme)) {
+        $result = $palettes[$Theme].Clone(); $result.Name = $Theme; return $result
+    }
+    $presetColors = @{
+        color01='#2A2F80'; color02='#3953A5'; color03='#4378BC'; color04='#6FCCDE'; color05='#99CB6F'
+        color06='#F6EB14'; color07='#F67F21'; color08='#EE2024'; color09='#7D1415'; black='#000000'
+    }
+    if ($presetColors.ContainsKey($Theme)) {
+        $result = Get-ThemePalette 'custom' $presetColors[$Theme]
+        $result.Name = $Theme
+        return $result
+    }
+    try { $color = [Windows.Media.ColorConverter]::ConvertFromString($CustomColor) } catch { return Get-ThemePalette 'default' }
+    $luminance = ((0.2126 * $color.R) + (0.7152 * $color.G) + (0.0722 * $color.B)) / 255.0
+    $dark = $luminance -lt 0.53
+    $mix = {
+        param([double]$amount)
+        $target = if ($dark) { 255 } else { 0 }
+        $r = [int][Math]::Round($color.R + (($target - $color.R) * $amount))
+        $g = [int][Math]::Round($color.G + (($target - $color.G) * $amount))
+        $b = [int][Math]::Round($color.B + (($target - $color.B) * $amount))
+        return '#{0:X2}{1:X2}{2:X2}' -f $r,$g,$b
+    }
+    return @{
+        Name='custom'; Background=('#F2{0:X2}{1:X2}{2:X2}' -f $color.R,$color.G,$color.B)
+        Border=&$mix 0.30; Primary=if ($dark) {'#F8FAFC'} else {'#18212A'}
+        Secondary=if ($dark) {'#E1E7ED'} else {'#303C48'}
+        Muted=if ($dark) {'#C2CBD5'} else {'#52606D'}
+        Soft=if ($dark) {'#B2BDC8'} else {'#62707D'}
+        Track=&$mix 0.17; IsDark=$dark
+    }
+}
+
+function Save-Appearance([string]$Theme, [string]$CustomColor = '') {
+    if ($ValidateUI) { return }
+    try {
+        $folder = Split-Path $script:appearancePath -Parent
+        if (-not (Test-Path -LiteralPath $folder)) { [void](New-Item -ItemType Directory -Path $folder -Force) }
+        @{ Theme=$Theme; CustomColor=$CustomColor; FollowPet=$script:followPetEnabled } | ConvertTo-Json -Compress | Set-Content -LiteralPath $script:appearancePath -Encoding UTF8
+    } catch { }
+}
+
+function Apply-Appearance([string]$Theme, [string]$CustomColor = '', [switch]$Persist) {
+    $palette = Get-ThemePalette $Theme $CustomColor
+    $script:currentTheme = $palette
+    $script:currentCustomColor = $CustomColor
+    $script:themeMutedBrush = New-ThemeBrush $palette.Muted
+    $ui.Card.Background = New-ThemeBrush $palette.Background
+    $ui.Card.BorderBrush = New-ThemeBrush $palette.Border
+    foreach ($name in @('TitleText','CompactTitle','MediumTitle')) { $ui[$name].Foreground = New-ThemeBrush $palette.Primary }
+    foreach ($name in @('WeeklyLabel','MediumWeeklyLabel')) { $ui[$name].Foreground = New-ThemeBrush $palette.Secondary }
+    foreach ($name in @('ResetCountText','Updated','CompactWeeklyReset','CompactResetCount','MediumWeeklyReset','MediumResetCount','WeeklyReset')) { $ui[$name].Foreground = New-ThemeBrush $palette.Muted }
+    $ui.WeeklyBar.Background = New-ThemeBrush $palette.Track
+    $ui.MediumWeeklyBar.Background = New-ThemeBrush $palette.Track
+    $ui.MediumWeeklyBar.BorderBrush = New-ThemeBrush $palette.Border
+    foreach ($panelName in @('CreditDetailsPanel','CompactCreditDetailsPanel','MediumCreditDetailsPanel')) {
+        foreach ($row in @($ui[$panelName].Children)) {
+            if ($row -is [Windows.Controls.Panel]) { foreach ($child in @($row.Children)) { if ($child -is [Windows.Controls.TextBlock]) { $child.Foreground = $script:themeMutedBrush } } }
+            elseif ($row -is [Windows.Controls.TextBlock]) { $row.Foreground = $script:themeMutedBrush }
+        }
+    }
+    $script:lastVisualState = $null
+    if ($Persist) { Save-Appearance $palette.Name $CustomColor }
+}
+
+$savedTheme = 'default'; $savedCustomColor = ''
+if (-not $ValidateUI -and (Test-Path -LiteralPath $script:appearancePath)) {
+    try {
+        $savedAppearance = Get-Content -LiteralPath $script:appearancePath -Raw | ConvertFrom-Json
+        if ($null -ne $savedAppearance.Theme) { $savedTheme = [string]$savedAppearance.Theme }
+        if ($null -ne $savedAppearance.CustomColor) { $savedCustomColor = [string]$savedAppearance.CustomColor }
+        if ($null -ne $savedAppearance.PSObject.Properties['FollowPet']) { $script:followPetEnabled = [bool]$savedAppearance.FollowPet }
+    } catch { }
+}
+if ($ValidateUI -and -not [string]::IsNullOrWhiteSpace($ValidateTheme)) { $savedTheme = $ValidateTheme; if ($ValidateTheme -eq 'custom') { $savedCustomColor = '#18324A' } }
+Apply-Appearance $savedTheme $savedCustomColor
+
 function Refresh-WindowTopmost {
     if (([datetime]::Now - $script:lastTopmostRefresh).TotalSeconds -lt 2) { return }
     try {
@@ -881,17 +1065,17 @@ function Update-CreditDetailPanel([double]$FontSize = 8.5, [switch]$Rebuild) {
                 $rightColumn.Width = [Windows.GridLength]::Auto; $rightColumn.SharedSizeGroup = 'ResetExpiry'
                 [void]$row.ColumnDefinitions.Add($leftColumn); [void]$row.ColumnDefinitions.Add($gapColumn); [void]$row.ColumnDefinitions.Add($rightColumn)
                 $left = New-Object Windows.Controls.TextBlock
-                $left.Text = $item.Type; $left.FontSize = $rowFont; $left.Foreground = '#656B75'; $left.FontWeight = 'SemiBold'; $left.HorizontalAlignment = 'Left'
+                $left.Text = $item.Type; $left.FontSize = $rowFont; $left.Foreground = $script:themeMutedBrush; $left.FontWeight = 'SemiBold'; $left.HorizontalAlignment = 'Left'
                 $right = New-Object Windows.Controls.TextBlock
                 $right.Text = if ($setting.Compact) { $item.ExpiryCompact } else { $item.Expiry }
                 $right.Tag = [pscustomobject]@{ Full=$item.Expiry; Compact=$item.ExpiryCompact }
-                $right.FontSize = $rowFont; $right.Foreground = '#656B75'; $right.HorizontalAlignment = 'Right'; $right.TextAlignment = 'Right'
+                $right.FontSize = $rowFont; $right.Foreground = $script:themeMutedBrush; $right.HorizontalAlignment = 'Right'; $right.TextAlignment = 'Right'
                 [Windows.Controls.Grid]::SetColumn($right, 2)
                 [void]$row.Children.Add($left); [void]$row.Children.Add($right); [void]$panel.Children.Add($row)
             }
             if ($panel.Children.Count -eq 0) {
                 $empty = New-Object Windows.Controls.TextBlock
-                $empty.Text = $ui.CreditDetailsText.Text; $empty.FontSize = $rowFont; $empty.Foreground = '#656B75'; $empty.TextAlignment = 'Center'; $empty.HorizontalAlignment = 'Center'
+                $empty.Text = $ui.CreditDetailsText.Text; $empty.FontSize = $rowFont; $empty.Foreground = $script:themeMutedBrush; $empty.TextAlignment = 'Center'; $empty.HorizontalAlignment = 'Center'
                 [void]$panel.Children.Add($empty)
             }
         } else {
@@ -911,7 +1095,12 @@ function Update-CreditDetailPanel([double]$FontSize = 8.5, [switch]$Rebuild) {
 }
 
 function Update-Display {
-    $data = Get-QuotaData -Path $DataFile
+    param([switch]$FastStart)
+    if ($FastStart) {
+        $data = [pscustomobject]@{ Available=$false; Message=''; ResetCreditDetails=@() }
+    } else {
+        $data = Get-QuotaData -Path $DataFile
+    }
     $ui.ResetCountText.Text = ''
     $ui.Updated.Text = [datetime]::Now.ToString('HH:mm')
     if (-not $data.Available) {
@@ -984,12 +1173,13 @@ function Set-QuotaState {
     param([string]$State)
     if ($script:lastVisualState -eq $State) { return }
     $script:lastVisualState = $State
+    $darkTheme = ($null -ne $script:currentTheme -and $script:currentTheme.IsDark)
     $settings = switch ($State) {
-        'critical' { @('#B91C1C', 0.38) }
-        'low'      { @('#FF3B30', 0.62) }
-        'saving'   { @('#FFCC00', 0.92) }
-        'normal'   { @('#34C759', 1.35) }
-        default    { @('#8E8E93', 1.60) }
+        'critical' { @(if ($darkTheme) { '#FF7B7B' } else { '#B91C1C' }, 0.38) }
+        'low'      { @(if ($darkTheme) { '#FF746B' } else { '#FF3B30' }, 0.62) }
+        'saving'   { @(if ($darkTheme) { '#FFDA45' } else { '#FFCC00' }, 0.92) }
+        'normal'   { @(if ($darkTheme) { '#4ADE80' } else { '#34C759' }, 1.35) }
+        default    { @(if ($darkTheme) { '#CBD5E1' } else { '#8E8E93' }, 1.60) }
     }
     $ui.PulseDot.Fill = $settings[0]
     $ui.CompactDot.Fill = $settings[0]
@@ -1099,7 +1289,7 @@ function Test-CodexRunning {
 }
 
 function Sync-WithOfficialPet {
-    if (-not $FollowPet) { return $false }
+    if (-not $script:followPetEnabled) { return $false }
     $pet = Get-OfficialPetState
     if ($null -eq $pet -or -not $pet.Open) {
         return $false
@@ -1151,10 +1341,135 @@ function Update-WindowPresence {
     Refresh-WindowTopmost
 }
 
+function Show-CustomColorDialog {
+    [xml]$dialogXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="" Width="390" Height="178"
+ WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
+ Background="#FFF7F8FA" FontFamily="Segoe UI">
+ <Grid Margin="18">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <TextBlock x:Name="Prompt" Foreground="#303640" FontSize="13" Margin="0,0,0,10"/>
+  <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="38"/><ColumnDefinition Width="88"/></Grid.ColumnDefinitions>
+   <TextBox x:Name="HexInput" Height="32" FontSize="14" VerticalContentAlignment="Center" Padding="8,0" Text="#4378BC"/>
+   <Border x:Name="Preview" Grid.Column="1" Width="28" Height="28" Margin="8,2,0,2" CornerRadius="6" Background="#4378BC" BorderBrush="#33000000" BorderThickness="1"/>
+   <Button x:Name="ChooseButton" Grid.Column="2" Height="30" Margin="8,1,0,1"/>
+  </Grid>
+  <TextBlock x:Name="ErrorText" Grid.Row="2" Foreground="#D92D20" FontSize="11" Margin="0,5,0,0" MinHeight="16"/>
+  <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+   <Button x:Name="CancelButton" Width="72" Height="29" Margin="0,0,8,0"/>
+   <Button x:Name="ApplyButton" Width="72" Height="29" IsDefault="True" Background="#2563EB" Foreground="White" BorderThickness="0"/>
+  </StackPanel>
+ </Grid>
+</Window>
+'@
+    $reader = New-Object System.Xml.XmlNodeReader $dialogXaml
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    $prompt = $dialog.FindName('Prompt'); $input = $dialog.FindName('HexInput'); $preview = $dialog.FindName('Preview')
+    $errorText = $dialog.FindName('ErrorText'); $applyButton = $dialog.FindName('ApplyButton'); $cancelButton = $dialog.FindName('CancelButton'); $chooseButton = $dialog.FindName('ChooseButton')
+    $dialog.Title = $strings.CustomColor; $prompt.Text = $strings.HexPrompt; $chooseButton.Content = $strings.ChooseColor; $applyButton.Content = $strings.Confirm; $cancelButton.Content = $strings.Cancel
+    $initialColor = ConvertTo-HexColor ([string]$script:currentCustomColor)
+    if ($null -eq $initialColor -and ([string]$script:currentTheme.Background) -match '^#[0-9A-Fa-f]{8}$') {
+        $initialColor = '#' + ([string]$script:currentTheme.Background).Substring(3)
+    }
+    if ($null -ne $initialColor) { $input.Text = $initialColor; $preview.Background = New-ThemeBrush $initialColor }
+    $script:hexDialogResult = $null
+    $input.Add_TextChanged({
+        param($sender,$eventArgs)
+        $hostWindow = [Windows.Window]::GetWindow($sender)
+        $value = ConvertTo-HexColor ([string]$sender.Text)
+        if ($null -ne $value) { $hostWindow.FindName('Preview').Background = New-ThemeBrush $value; $hostWindow.FindName('ErrorText').Text = '' }
+    })
+    $chooseButton.Add_Click({
+        param($sender,$eventArgs)
+        try {
+            $hostWindow = [Windows.Window]::GetWindow($sender)
+            $dialogInput = $hostWindow.FindName('HexInput')
+            Add-Type -AssemblyName System.Windows.Forms
+            $picker = New-Object System.Windows.Forms.ColorDialog
+            $picker.FullOpen = $true
+            $current = ConvertTo-HexColor ([string]$dialogInput.Text)
+            if ($null -ne $current) { $picker.Color = [System.Drawing.ColorTranslator]::FromHtml($current) }
+            if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                $dialogInput.Text = '#{0:X2}{1:X2}{2:X2}' -f $picker.Color.R,$picker.Color.G,$picker.Color.B
+            }
+            $picker.Dispose()
+        } catch { Write-DiagnosticLog ('Color selection failed: ' + $_.Exception.Message) }
+    })
+    $applyButton.Add_Click({
+        param($sender,$eventArgs)
+        $hostWindow = [Windows.Window]::GetWindow($sender)
+        $dialogInput = $hostWindow.FindName('HexInput')
+        $value = ConvertTo-HexColor ([string]$dialogInput.Text)
+        if ($null -eq $value) { $hostWindow.FindName('ErrorText').Text = $strings.InvalidHex; $dialogInput.Focus(); $dialogInput.SelectAll(); return }
+        $script:hexDialogResult = $value
+        $hostWindow.DialogResult = $true
+    })
+    $cancelButton.Add_Click({ param($sender,$eventArgs) $hostWindow = [Windows.Window]::GetWindow($sender); $hostWindow.DialogResult = $false })
+    try { $dialog.Owner = $window } catch { }
+    $dialog.Add_ContentRendered({
+        param($sender,$eventArgs)
+        $dialogInput = $sender.FindName('HexInput')
+        $dialogInput.Focus(); $dialogInput.SelectAll()
+        if ($ValidateCustomDialog) {
+            $sender.FindName('ApplyButton').RaiseEvent((New-Object Windows.RoutedEventArgs([Windows.Controls.Button]::ClickEvent)))
+        }
+    })
+    [void]$dialog.ShowDialog()
+    return $script:hexDialogResult
+}
+
 $menu = New-Object Windows.Controls.ContextMenu
+$colorMenu = New-Object Windows.Controls.MenuItem; $colorMenu.Header = $strings.Colors
+$colorChoices = @(
+    @{ Header=$strings.DefaultColor; Theme='default'; Color='#FFFFFF' },
+    @{ Header='RGB 42, 47, 128'; Theme='color01'; Color='#2A2F80' },
+    @{ Header='RGB 57, 83, 165'; Theme='color02'; Color='#3953A5' },
+    @{ Header='RGB 67, 120, 188'; Theme='color03'; Color='#4378BC' },
+    @{ Header='RGB 111, 204, 222'; Theme='color04'; Color='#6FCCDE' },
+    @{ Header='RGB 153, 203, 111'; Theme='color05'; Color='#99CB6F' },
+    @{ Header='RGB 246, 235, 20'; Theme='color06'; Color='#F6EB14' },
+    @{ Header='RGB 246, 127, 33'; Theme='color07'; Color='#F67F21' },
+    @{ Header='RGB 238, 32, 36'; Theme='color08'; Color='#EE2024' },
+    @{ Header='RGB 125, 20, 21'; Theme='color09'; Color='#7D1415' },
+    @{ Header=$strings.BlackColor; Theme='black'; Color='#000000' }
+)
+foreach ($choice in $colorChoices) {
+    $item = New-Object Windows.Controls.MenuItem; $item.Header = $choice.Header; $item.Tag = $choice.Theme
+    $swatch = New-Object Windows.Controls.Border; $swatch.Width = 14; $swatch.Height = 14; $swatch.CornerRadius = 3
+    $swatch.Background = New-ThemeBrush $choice.Color; $swatch.BorderBrush = New-ThemeBrush '#55000000'; $swatch.BorderThickness = 1
+    $item.Icon = $swatch
+    $item.Add_Click({ param($sender,$eventArgs) Apply-Appearance ([string]$sender.Tag) '' -Persist; Update-Display })
+    [void]$colorMenu.Items.Add($item)
+}
+$customColorItem = New-Object Windows.Controls.MenuItem; $customColorItem.Header = $strings.CustomColor
+$customColorItem.Add_Click({
+    try {
+        $selected = Show-CustomColorDialog
+        if (-not [string]::IsNullOrWhiteSpace($selected)) {
+            Apply-Appearance 'custom' $selected -Persist
+            Update-Display
+        }
+    } catch { Write-DiagnosticLog ('Custom color dialog failed: ' + $_.Exception.Message) }
+})
+[void]$colorMenu.Items.Add((New-Object Windows.Controls.Separator)); [void]$colorMenu.Items.Add($customColorItem)
+$followPetItem = New-Object Windows.Controls.MenuItem
+$followPetItem.Header = $strings.FollowPet; $followPetItem.IsCheckable = $true; $followPetItem.IsChecked = $script:followPetEnabled
+$followPetItem.Add_Click({
+    param($sender,$eventArgs)
+    $script:followPetEnabled = [bool]$sender.IsChecked
+    if (-not $script:followPetEnabled) {
+        $script:wasFollowingPet = $false
+        $script:noPetPositionInitialized = $true
+        Save-WindowPlacement
+    } else {
+        $script:noPetPositionInitialized = $false
+        [void](Sync-WithOfficialPet)
+    }
+    Save-Appearance $script:currentTheme.Name $script:currentCustomColor
+})
 $refreshItem = New-Object Windows.Controls.MenuItem; $refreshItem.Header = $strings.Refresh
 $exitItem = New-Object Windows.Controls.MenuItem; $exitItem.Header = $strings.Exit
-[void]$menu.Items.Add($refreshItem); [void]$menu.Items.Add($exitItem)
+[void]$menu.Items.Add($colorMenu); [void]$menu.Items.Add($followPetItem); [void]$menu.Items.Add((New-Object Windows.Controls.Separator)); [void]$menu.Items.Add($refreshItem); [void]$menu.Items.Add($exitItem)
 $refreshItem.Add_Click({ Update-Display }); $exitItem.Add_Click({ $window.Close() })
 $ui.Card.ContextMenu = $menu
 $window.ContextMenu = $menu
@@ -1308,13 +1623,22 @@ $timer.Add_Tick({
 $timer.Start()
 if (-not $ValidateUI) { Restore-WindowPlacement }
 if (-not $ValidateUI) { Update-WindowPresence }
-Update-Display
+if ($ValidateUI) { Update-Display } else { Update-Display -FastStart; $script:lastDisplayRefresh = [datetime]::Now }
 if ($ValidateUI) {
     $window.Height = $script:targetContentHeight
+    if ($ValidateCustomDialog) {
+        try { [void](Show-CustomColorDialog); Write-Output 'CUSTOM_DIALOG_OK' }
+        catch { Write-Output ('CUSTOM_DIALOG_ERROR=' + $_.Exception.Message); $window.Close(); exit 1 }
+    }
     Write-Output 'UI_OK'
     Write-Output ('COLOR=' + $ui.PulseDot.Fill.ToString())
     Write-Output ('WEEKLY_COLOR=' + $ui.WeeklyText.Foreground.ToString())
     Write-Output ('WEEKLY_BAR_COLOR=' + $ui.WeeklyBar.Foreground.ToString())
+    Write-Output ('THEME=' + $script:currentTheme.Name)
+    Write-Output ('THEME_BACKGROUND=' + $ui.Card.Background.ToString())
+    Write-Output ('THEME_PRIMARY=' + $ui.TitleText.Foreground.ToString())
+    Write-Output ('THEME_MUTED=' + $ui.WeeklyReset.Foreground.ToString())
+    if (-not [string]::IsNullOrWhiteSpace($ValidateHexColor)) { Write-Output ('HEX_NORMALIZED=' + (ConvertTo-HexColor $ValidateHexColor)) }
     Write-Output ('TRANSPARENT_WINDOW=' + $window.AllowsTransparency)
     Write-Output ('RESET_WEIGHT=' + $ui.ResetCountText.FontWeight.ToString())
     Write-Output ('WEEKLY_RESET=' + $ui.WeeklyReset.Text)

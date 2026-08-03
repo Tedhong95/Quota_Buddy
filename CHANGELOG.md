@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.0 - 2026-08-03
+
+- Added panel color presets based on the requested RGB palette, plus black, a native color picker, direct HEX input, automatic high-contrast text, and one-click default restoration.
+- Added a persistent right-click pet-follow toggle.
+- Updated compatibility for the unified ChatGPT desktop app and weekly-only quota responses.
+- Improved startup responsiveness by showing the panel before quota refreshes and reusing the desktop client's quota helper.
+- Fixed custom-color dialog crashes and retained compact responsive layouts across all themes.
+- Improved pet following across Store and direct-download clients, fresh installations, multiple displays, different DPI settings, and non-standard pet sizes by using the active pet anchor and actual dimensions.
+- Expanded self-tests for themes, HEX colors, the custom-color dialog, unified-client quota data, and multiple pet-state formats and sizes.
+
 ## v0.3.0 - 2026-07-15
 
 - Improved responsive typography so text and status elements scale continuously with the panel width while the layout remains compact.

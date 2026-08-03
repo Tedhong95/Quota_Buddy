@@ -13,6 +13,18 @@ try {
     [IO.File]::WriteAllText($petSample, $petFixture, [Text.Encoding]::UTF8)
     $petResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -ValidatePositioning -PetStateFile $petSample -ValidatePanelWidth 160) | ConvertFrom-Json
     if (-not $petResult.Available -or -not $petResult.Open -or $petResult.Left -ne 80 -or $petResult.Top -ne 324) { throw '宠物正下方定位计算错误' }
+    $newPetFixture = '{"electron-avatar-overlay-open":true,"electron-avatar-overlay-bounds":{"x":500,"y":300,"displayBounds":{"x":0,"y":0,"width":1920,"height":1080},"displayId":22,"placement":"top-end","byDisplayId":{"11":{"x":100,"y":100,"width":356,"height":320,"anchor":{"x":348,"y":325,"width":80,"height":87},"displayBounds":{"x":0,"y":0,"width":1920,"height":1080},"displayId":11,"mascot":{"left":248,"top":225,"width":80,"height":87},"placement":"top-end"},"22":{"x":500,"y":300,"displayId":22,"placement":"top-end"}}}}'
+    [IO.File]::WriteAllText($petSample, $newPetFixture, [Text.Encoding]::UTF8)
+    $newPetResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -ValidatePositioning -PetStateFile $petSample -ValidatePanelWidth 160) | ConvertFrom-Json
+    if (-not $newPetResult.Available -or $newPetResult.Left -ne 460 -or $newPetResult.Top -ne 391) { throw '新版桌面端宠物定位计算错误' }
+    $freshPetFixture = '{"electron-avatar-overlay-open":true,"electron-avatar-overlay-bounds":{"x":700,"y":400,"displayId":33,"byDisplayId":{"33":{"x":700,"y":400,"displayId":33}},"placement":"top-end"}}'
+    [IO.File]::WriteAllText($petSample, $freshPetFixture, [Text.Encoding]::UTF8)
+    $freshPetResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -ValidatePositioning -PetStateFile $petSample -ValidatePanelWidth 160) | ConvertFrom-Json
+    if (-not $freshPetResult.Available -or $freshPetResult.Left -ne 660 -or $freshPetResult.Top -ne 491) { throw '全新电脑宠物定位计算错误' }
+    $largePetFixture = '{"electron-avatar-overlay-open":true,"electron-avatar-overlay-bounds":{"x":500,"y":300,"displayId":44,"placement":"top-end","byDisplayId":{"44":{"x":400,"y":200,"width":420,"height":360,"anchor":{"x":600,"y":400,"width":128,"height":110},"displayBounds":{"x":0,"y":0,"width":2560,"height":1440},"displayId":44,"mascot":{"left":200,"top":200,"width":128,"height":110},"placement":"top-end"}}}}'
+    [IO.File]::WriteAllText($petSample, $largePetFixture, [Text.Encoding]::UTF8)
+    $largePetResult = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -ValidatePositioning -PetStateFile $petSample -ValidatePanelWidth 160) | ConvertFrom-Json
+    if (-not $largePetResult.Available -or $largePetResult.Left -ne 584 -or $largePetResult.Top -ne 514) { throw '不同宠物尺寸的居中定位计算错误' }
     $launchProbe = & cscript.exe //NoLogo $launcher zh-CN --probe
     if ($LASTEXITCODE -ne 0 -or $launchProbe -notmatch 'QuotaBuddy\.ps1" -Language zh-CN$') { throw '无窗口启动器未能正确建立启动命令' }
     foreach ($switchCase in @(@('zh-CN', 'en-US'), @('en-US', 'zh-CN'))) {
@@ -82,7 +94,14 @@ try {
     [IO.File]::WriteAllText($sample, $greenFixture, [Text.Encoding]::UTF8)
     $uiZh = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
     $uiEn = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language en-US -DataFile $sample
+    $uiDark = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -ValidateTheme black -ValidateWidth 96 -Language zh-CN -DataFile $sample
+    $uiCustom = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -ValidateTheme custom -ValidateHexColor 4378bc -ValidateCustomDialog -ValidateWidth 420 -Language en-US -DataFile $sample
     if ($uiZh -notcontains 'UI_OK' -or $uiEn -notcontains 'UI_OK') { throw '中英文悬浮窗口未能正确建立' }
+    if ($uiDark -notcontains 'UI_OK' -or $uiCustom -notcontains 'UI_OK') { throw '自定义配色窗口未能正确建立' }
+    if ($uiDark -notcontains 'THEME=black' -or $uiDark -notcontains 'THEME_PRIMARY=#FFF8FAFC') { throw '黑色主题没有使用清晰的浅色文字' }
+    if ($uiCustom -notcontains 'THEME=custom' -or $uiCustom -notcontains 'THEME_PRIMARY=#FFF8FAFC') { throw '自定义深色背景没有自动切换清晰文字' }
+    if ($uiCustom -notcontains 'HEX_NORMALIZED=#4378BC') { throw 'HEX 色号输入没有被正确识别' }
+    if ($uiCustom -notcontains 'CUSTOM_DIALOG_OK') { throw '自定义颜色窗口无法正常打开' }
     if ($uiZh -notcontains 'TRANSPARENT_WINDOW=True' -or $uiEn -notcontains 'TRANSPARENT_WINDOW=True') { throw '窗口透明圆角外观未保持' }
     if (-not ($uiZh -match 'WEEKLY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
     if (-not ($uiEn -match 'WEEKLY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'WEEKLY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
