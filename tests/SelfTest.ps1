@@ -34,7 +34,13 @@ try {
         $switchOwnerInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SwitchTestWait -SwitchTestId {1} -Language {2}' -f $app, $switchTestId, $switchCase[0]
         $switchOwnerInfo.UseShellExecute = $false; $switchOwnerInfo.RedirectStandardOutput = $true; $switchOwnerInfo.CreateNoWindow = $true
         $switchOwner = [Diagnostics.Process]::Start($switchOwnerInfo)
-        Start-Sleep -Milliseconds 500
+        $switchReady = Join-Path ([IO.Path]::GetTempPath()) ('quota-buddy-switch-ready.{0}.txt' -f $switchTestId)
+        for ($attempt = 0; $attempt -lt 400 -and -not (Test-Path -LiteralPath $switchReady); $attempt++) { Start-Sleep -Milliseconds 50 }
+        if (-not (Test-Path -LiteralPath $switchReady)) {
+            try { $switchOwner.Kill() } catch { }
+            $switchOwner.Dispose()
+            throw '中英文版本切换测试未准备完成'
+        }
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $app -SwitchTestId $switchTestId -Language $switchCase[1]
         if (-not $switchOwner.WaitForExit(10000)) {
             try { $switchOwner.Kill() } catch { }
@@ -43,6 +49,7 @@ try {
         }
         $switchResult = $switchOwner.StandardOutput.ReadToEnd().Trim()
         $switchOwner.Dispose()
+        Remove-Item -LiteralPath $switchReady -Force -ErrorAction SilentlyContinue
         if ($switchResult -ne ('SWITCH=' + $switchCase[1])) { throw '中英文版本切换通知失败' }
     }
     $fallbackTestId = [guid]::NewGuid().ToString('N')
@@ -53,7 +60,7 @@ try {
     $fallbackOwnerInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -SwitchTestWait -SwitchTestId {1} -Language zh-CN' -f $app, $fallbackTestId
     $fallbackOwnerInfo.UseShellExecute = $false; $fallbackOwnerInfo.RedirectStandardOutput = $true; $fallbackOwnerInfo.CreateNoWindow = $true
     $fallbackOwner = [Diagnostics.Process]::Start($fallbackOwnerInfo)
-    for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path -LiteralPath $fallbackReady); $attempt++) {
+    for ($attempt = 0; $attempt -lt 400 -and -not (Test-Path -LiteralPath $fallbackReady); $attempt++) {
         Start-Sleep -Milliseconds 50
     }
     if (-not (Test-Path -LiteralPath $fallbackReady)) {
@@ -105,19 +112,21 @@ try {
     if ($uiZh -notcontains 'TRANSPARENT_WINDOW=True' -or $uiEn -notcontains 'TRANSPARENT_WINDOW=True') { throw '窗口透明圆角外观未保持' }
     if (-not ($uiZh -match 'WEEKLY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
     if (-not ($uiEn -match 'WEEKLY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'WEEKLY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
-    if ($uiZh -match '5小时' -or $uiEn -match '5 hours') { throw '界面仍显示已取消的 5 小时额度' }
+    if (-not ($uiZh -match 'FIVE_HOUR_TEXT=75%') -or -not ($uiEn -match 'FIVE_HOUR_TEXT=75%')) { throw '界面未恢复显示 5 小时额度' }
+    if (-not ($uiZh -match 'FIVE_HOUR_RESET=') -or -not ($uiEn -match 'FIVE_HOUR_RESET=')) { throw '界面未显示 5 小时恢复时间' }
     if (-not ($uiZh -match 'COLOR=#FF34C759')) { throw '充足额度未显示绿色状态灯' }
     if (-not ($uiZh -match 'WEEKLY_COLOR=#FF34C759') -or -not ($uiZh -match 'WEEKLY_BAR_COLOR=#FF34C759')) { throw '每周额度文字或进度条未与呼吸灯保持同色' }
     $secondaryLowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":25,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":95,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}'
     [IO.File]::WriteAllText($sample, $secondaryLowFixture, [Text.Encoding]::UTF8)
     $uiSecondaryLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
-    if (-not ($uiSecondaryLow -match 'COLOR=#FFB91C1C')) { throw '每周额度极低时状态灯未正确变色' }
+    if (-not ($uiSecondaryLow -match 'COLOR=#FF34C759')) { throw '呼吸灯错误地使用了每周额度变色' }
     if (-not ($uiSecondaryLow -match 'WEEKLY_COLOR=#FFB91C1C') -or -not ($uiSecondaryLow -match 'WEEKLY_BAR_COLOR=#FFB91C1C')) { throw '极低额度时文字、进度条和呼吸灯颜色不一致' }
     if (-not ($uiZh -match 'RESET_WEIGHT=SemiBold') -or -not ($uiEn -match 'RESET_WEIGHT=SemiBold')) { throw '宽屏重置次数未保持半粗体' }
     $lowFixture = '"codex.rate_limits","plan_type":"plus","rate_limits":{"primary":{"used_percent":85,"window_minutes":300,"reset_after_seconds":7200,"reset_at":' + $testPrimaryReset + '},"secondary":{"used_percent":42,"window_minutes":10080,"reset_after_seconds":172800,"reset_at":' + $testSecondaryReset + '}}'
     [IO.File]::WriteAllText($sample, $lowFixture, [Text.Encoding]::UTF8)
     $uiLow = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $app -ValidateUI -Language zh-CN -DataFile $sample
-    if (-not ($uiLow -match 'COLOR=#FF34C759')) { throw '状态灯错误地使用了已取消的 5 小时额度' }
+    if (-not ($uiLow -match 'COLOR=#FFFF3B30')) { throw '呼吸灯没有按 5 小时额度显示颜色' }
+    if (-not ($uiLow -match 'FIVE_HOUR_COLOR=#FFFF3B30') -or -not ($uiLow -match 'FIVE_HOUR_BAR_COLOR=#FFFF3B30')) { throw '5 小时额度文字或进度条未按自身额度变色' }
     Write-Host 'Quota Buddy 自检：全部通过 / All tests passed' -ForegroundColor Green
 } finally {
     Remove-Item -LiteralPath $sample -Force -ErrorAction SilentlyContinue

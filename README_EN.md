@@ -2,7 +2,7 @@
 
 [中文说明](README.md) · [MIT License](LICENSE)
 
-Quota Buddy is a small Windows utility that displays the remaining weekly Codex quota, available reset credits, reset types, and expiration dates below the official Codex pet.
+Quota Buddy is a small Windows utility that displays the remaining 5-hour and weekly Codex quotas, available reset credits, reset types, and expiration dates below the official Codex pet.
 
 ## Use
 
@@ -17,14 +17,14 @@ The first run adds a Windows sign-in startup entry. The panel stays directly bel
 
 ## Features
 
-- Shows the weekly quota, reset time, and each available reset credit's type and expiration date.
+- Shows the 5-hour and weekly quotas, their reset times, and each available reset credit's type and expiration date.
 - Adapts its layout to the window width.
 - Automatically tightens its height to prevent cropped content and unnecessary blank space.
 - Supports color presets, black, the system color picker, and direct HEX entry while maintaining readable text contrast.
 - Lets you enable or disable pet following from the right-click menu.
 - Changes the indicator color and breathing speed as quota decreases.
 
-The breathing indicator follows the weekly quota: green at 50% or more, yellow at 21%–49%, red at 6%–20%, dark red at 5% or less, and gray when data is unavailable.
+The breathing indicator follows the 5-hour quota: green at 50% or more, yellow at 21%–49%, red at 6%–20%, dark red at 5% or less, and gray when data is unavailable. Each quota row uses the same thresholds based on its own remaining quota.
 
 ## Privacy
 

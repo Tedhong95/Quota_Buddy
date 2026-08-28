@@ -57,7 +57,7 @@ $script:adjustingResponsiveSize = $false
 $script:restoringWindowPlacement = $false
 $script:lastDisplayRefresh = [datetime]::MinValue
 $script:creditDetailLineCount = 1
-$script:targetContentHeight = 118.0
+$script:targetContentHeight = 148.0
 $script:wideCreditLines = @()
 $script:positioningForPet = $false
 $script:wasFollowingPet = $false
@@ -352,7 +352,7 @@ function Start-OfficialClient {
     if (-not $started -or $null -eq $process) { throw 'Unable to start Codex quota service' }
     $script:officialProcess = $process
 
-    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='0.4.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
+    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='1.0.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
     $process.StandardInput.WriteLine($initialize)
     $process.StandardInput.Flush()
     $initialized = $false
@@ -863,28 +863,36 @@ public static class QuotaBuddyWindowProbe
 }
 
 $strings = if ($Language -eq 'en-US') {
-    @{ Title='Codex quota'; Weekly='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; ResetAt='reset'; Credits='available resets'; CreditType='Full reset'; Expires='expires'; NoCredits='No reset credits'; CreditDetailsUnavailable='Reset details unavailable'; Colors='Panel color'; DefaultColor='Restore default'; CustomColor='Custom color...'; HexPrompt='Choose a color or enter a HEX color'; ChooseColor='Choose color'; Confirm='Apply'; Cancel='Cancel'; InvalidHex='Please enter a valid 6-digit HEX color'; FollowPet='Follow pet'; BlackColor='Black' }
+    @{ Title='Codex quota'; FiveHour='5 hours'; Weekly='Weekly'; Unavailable='Unavailable'; Refresh='Refresh now'; Exit='Exit Quota Buddy'; Updated='updated'; ResetAt='reset'; Credits='available resets'; CreditType='Full reset'; Expires='expires'; NoCredits='No reset credits'; CreditDetailsUnavailable='Reset details unavailable'; Colors='Panel color'; DefaultColor='Restore default'; CustomColor='Custom color...'; HexPrompt='Choose a color or enter a HEX color'; ChooseColor='Choose color'; Confirm='Apply'; Cancel='Cancel'; InvalidHex='Please enter a valid 6-digit HEX color'; FollowPet='Follow pet'; BlackColor='Black' }
 } else {
-    @{ Title='Codex额度'; Weekly='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; ResetAt='重置'; Credits='可用重置'; CreditType='全额重置'; Expires='到期'; NoCredits='暂无可用重置'; CreditDetailsUnavailable='重置详情暂不可用'; Colors='显示颜色'; DefaultColor='恢复默认'; CustomColor='自定义颜色...'; HexPrompt='请选择颜色或直接输入 HEX 色号'; ChooseColor='选择颜色'; Confirm='应用'; Cancel='取消'; InvalidHex='请输入有效的 6 位 HEX 色号'; FollowPet='跟随宠物'; BlackColor='黑色' }
+    @{ Title='Codex额度'; FiveHour='5小时'; Weekly='每周'; Unavailable='暂不可用'; Refresh='立即刷新'; Exit='退出额度伴侣'; Updated='更新'; ResetAt='重置'; Credits='可用重置'; CreditType='全额重置'; Expires='到期'; NoCredits='暂无可用重置'; CreditDetailsUnavailable='重置详情暂不可用'; Colors='显示颜色'; DefaultColor='恢复默认'; CustomColor='自定义颜色...'; HexPrompt='请选择颜色或直接输入 HEX 色号'; ChooseColor='选择颜色'; Confirm='应用'; Cancel='取消'; InvalidHex='请输入有效的 6 位 HEX 色号'; FollowPet='跟随宠物'; BlackColor='黑色' }
 }
 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Width="246" Height="118" MinWidth="80" MinHeight="72" MaxWidth="480" MaxHeight="230" ShowActivated="False"
+ Width="246" Height="148" MinWidth="80" MinHeight="92" MaxWidth="480" MaxHeight="280" ShowActivated="False"
  WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False"
  ResizeMode="CanResizeWithGrip" Left="1550" Top="680">
  <Grid x:Name="RootGrid" Margin="5" UseLayoutRounding="True" SnapsToDevicePixels="True" RenderOptions.ClearTypeHint="Enabled">
   <Border x:Name="Card" CornerRadius="12" Background="#F4FFFFFF" BorderBrush="#26000000" BorderThickness="1" Padding="8,6,8,6">
    <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.20"/></Border.Effect>
    <Grid>
-     <Grid.RowDefinitions><RowDefinition x:Name="TitleRow" Height="21"/><RowDefinition x:Name="WeeklyMainRow" Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <Grid.RowDefinitions><RowDefinition x:Name="TitleRow" Height="21"/><RowDefinition x:Name="FiveHourMainRow" Height="30"/><RowDefinition x:Name="WeeklyMainRow" Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid x:Name="DragArea" Cursor="SizeAll">
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <Ellipse x:Name="PulseDot" Width="7" Height="7" Fill="#24B36B" Margin="0,0,7,0" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5"><Ellipse.RenderTransform><ScaleTransform/></Ellipse.RenderTransform></Ellipse>
      <TextBlock x:Name="TitleText" Grid.Column="1" FontWeight="SemiBold" FontSize="12" Foreground="#272B31" VerticalAlignment="Center"/>
      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"><TextBlock x:Name="ResetCountText" Foreground="#858B95" FontSize="9" FontWeight="SemiBold"/><TextBlock x:Name="Updated" Foreground="#858B95" FontSize="9"/></StackPanel>
     </Grid>
-     <Grid x:Name="WeeklyRow" Grid.Row="1" Margin="0,1,0,0">
+     <Grid x:Name="FiveHourRow" Grid.Row="1" Margin="0,1,0,0">
+      <Grid.RowDefinitions><RowDefinition Height="16"/><RowDefinition Height="12"/></Grid.RowDefinitions>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
+      <TextBlock x:Name="FiveHourLabel" Foreground="#353A42" FontSize="11.5" VerticalAlignment="Center"/>
+      <ProgressBar x:Name="FiveHourBar" Grid.Column="1" Height="7" Minimum="0" Maximum="100" Margin="3,0,5,0" VerticalAlignment="Center" Foreground="#25B96D" Background="#E4E7EA"/>
+      <TextBlock x:Name="FiveHourText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
+      <TextBlock x:Name="FiveHourReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
+     </Grid>
+     <Grid x:Name="WeeklyRow" Grid.Row="2" Margin="0,1,0,0">
      <Grid.RowDefinitions><RowDefinition Height="16"/><RowDefinition Height="12"/></Grid.RowDefinitions>
      <Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
       <TextBlock x:Name="WeeklyLabel" Foreground="#353A42" FontSize="11.5" VerticalAlignment="Center"/>
@@ -892,18 +900,23 @@ $strings = if ($Language -eq 'en-US') {
       <TextBlock x:Name="WeeklyText" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="12"/>
       <TextBlock x:Name="WeeklyReset" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="3,-1,0,0" Foreground="#8B9099" FontSize="9"/>
      </Grid>
-     <TextBlock x:Name="CreditDetailsText" Grid.Row="2" Visibility="Collapsed"/>
-     <StackPanel x:Name="CreditDetailsPanel" Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-    <StackPanel x:Name="CompactPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
+     <TextBlock x:Name="CreditDetailsText" Grid.Row="3" Visibility="Collapsed"/>
+     <StackPanel x:Name="CreditDetailsPanel" Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <StackPanel x:Name="CompactPanel" Grid.RowSpan="4" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="CompactDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="CompactTitle" FontWeight="SemiBold" FontSize="8" Foreground="#272B31"/></StackPanel>
-      <TextBlock x:Name="CompactWeekly" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+      <TextBlock x:Name="CompactFiveHour" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,2,0,0"/>
+      <TextBlock x:Name="CompactFiveHourReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
+      <TextBlock x:Name="CompactWeekly" FontSize="8" Foreground="#353A42" HorizontalAlignment="Center" Margin="0,1,0,0"/>
       <TextBlock x:Name="CompactWeeklyReset" FontSize="7.5" Foreground="#777D86" TextAlignment="Center" TextWrapping="Wrap"/>
      <TextBlock x:Name="CompactResetCount" FontSize="7.5" FontWeight="SemiBold" Foreground="#656B75" TextAlignment="Center" HorizontalAlignment="Stretch" Margin="0,2,0,0"/>
      <TextBlock x:Name="CompactCredits" Visibility="Collapsed"/>
      <StackPanel x:Name="CompactCreditDetailsPanel" HorizontalAlignment="Center" Margin="0,1,0,0"/>
     </StackPanel>
-    <StackPanel x:Name="MediumPanel" Grid.RowSpan="3" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
+    <StackPanel x:Name="MediumPanel" Grid.RowSpan="4" Visibility="Collapsed" Cursor="SizeAll" HorizontalAlignment="Stretch">
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"><Ellipse x:Name="MediumDot" Width="5" Height="5" Fill="#24B36B" Margin="0,0,3,0" VerticalAlignment="Center"/><TextBlock x:Name="MediumTitle" FontWeight="SemiBold" FontSize="8.5" Foreground="#272B31"/></StackPanel>
+      <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumFiveHourLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumFiveHourText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
+      <ProgressBar x:Name="MediumFiveHourBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
+      <TextBlock x:Name="MediumFiveHourReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
       <DockPanel Margin="0,1,0,0"><TextBlock x:Name="MediumWeeklyLabel" DockPanel.Dock="Left" FontSize="8" Foreground="#353A42"/><TextBlock x:Name="MediumWeeklyText" DockPanel.Dock="Right" FontSize="8" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Right"/></DockPanel>
       <ProgressBar x:Name="MediumWeeklyBar" Height="7" Minimum="0" Maximum="100" Foreground="#25B96D" Background="#E4E7EA" BorderBrush="#C8CDD2" BorderThickness="0.5"/>
       <TextBlock x:Name="MediumWeeklyReset" FontSize="7" Foreground="#777D86" TextAlignment="Center"/>
@@ -924,12 +937,14 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 if ($ValidateUI -and $ValidateWidth -gt 0) {
     $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, $ValidateWidth))
 }
-$names = 'RootGrid','Card','TitleRow','WeeklyMainRow','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','WeeklyRow','CreditDetailsText','CreditDetailsPanel','CompactPanel','CompactDot','CompactTitle','CompactWeekly','CompactWeeklyReset','CompactResetCount','CompactCredits','CompactCreditDetailsPanel','MediumPanel','MediumDot','MediumTitle','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumResetCount','MediumCredits','MediumCreditDetailsPanel','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
+$names = 'RootGrid','Card','TitleRow','FiveHourMainRow','WeeklyMainRow','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','FiveHourRow','FiveHourLabel','FiveHourBar','FiveHourText','FiveHourReset','WeeklyRow','CreditDetailsText','CreditDetailsPanel','CompactPanel','CompactDot','CompactTitle','CompactFiveHour','CompactFiveHourReset','CompactWeekly','CompactWeeklyReset','CompactResetCount','CompactCredits','CompactCreditDetailsPanel','MediumPanel','MediumDot','MediumTitle','MediumFiveHourLabel','MediumFiveHourText','MediumFiveHourBar','MediumFiveHourReset','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumResetCount','MediumCredits','MediumCreditDetailsPanel','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
 $ui = @{}; foreach ($name in $names) { $ui[$name] = $window.FindName($name) }
 $ui.TitleText.Text = $strings.Title
+$ui.FiveHourLabel.Text = $strings.FiveHour
 $ui.WeeklyLabel.Text = $strings.Weekly
 $ui.CompactTitle.Text = $strings.Title
 $ui.MediumTitle.Text = $strings.Title
+$ui.MediumFiveHourLabel.Text = $strings.FiveHour
 $ui.MediumWeeklyLabel.Text = $strings.Weekly
 
 function New-ThemeBrush([string]$Color) {
@@ -997,10 +1012,13 @@ function Apply-Appearance([string]$Theme, [string]$CustomColor = '', [switch]$Pe
     $ui.Card.Background = New-ThemeBrush $palette.Background
     $ui.Card.BorderBrush = New-ThemeBrush $palette.Border
     foreach ($name in @('TitleText','CompactTitle','MediumTitle')) { $ui[$name].Foreground = New-ThemeBrush $palette.Primary }
-    foreach ($name in @('WeeklyLabel','MediumWeeklyLabel')) { $ui[$name].Foreground = New-ThemeBrush $palette.Secondary }
-    foreach ($name in @('ResetCountText','Updated','CompactWeeklyReset','CompactResetCount','MediumWeeklyReset','MediumResetCount','WeeklyReset')) { $ui[$name].Foreground = New-ThemeBrush $palette.Muted }
+    foreach ($name in @('FiveHourLabel','WeeklyLabel','MediumFiveHourLabel','MediumWeeklyLabel')) { $ui[$name].Foreground = New-ThemeBrush $palette.Secondary }
+    foreach ($name in @('ResetCountText','Updated','FiveHourReset','WeeklyReset','CompactFiveHourReset','CompactWeeklyReset','CompactResetCount','MediumFiveHourReset','MediumWeeklyReset','MediumResetCount')) { $ui[$name].Foreground = New-ThemeBrush $palette.Muted }
+    $ui.FiveHourBar.Background = New-ThemeBrush $palette.Track
     $ui.WeeklyBar.Background = New-ThemeBrush $palette.Track
+    $ui.MediumFiveHourBar.Background = New-ThemeBrush $palette.Track
     $ui.MediumWeeklyBar.Background = New-ThemeBrush $palette.Track
+    $ui.MediumFiveHourBar.BorderBrush = New-ThemeBrush $palette.Border
     $ui.MediumWeeklyBar.BorderBrush = New-ThemeBrush $palette.Border
     foreach ($panelName in @('CreditDetailsPanel','CompactCreditDetailsPanel','MediumCreditDetailsPanel')) {
         foreach ($row in @($ui[$panelName].Children)) {
@@ -1104,11 +1122,16 @@ function Update-Display {
     $ui.ResetCountText.Text = ''
     $ui.Updated.Text = [datetime]::Now.ToString('HH:mm')
     if (-not $data.Available) {
+        $ui.FiveHourText.Text = '--'; $ui.FiveHourReset.Text = $strings.Unavailable
+        $ui.FiveHourBar.Value = 0
         $ui.WeeklyText.Text = '--'; $ui.WeeklyReset.Text = $strings.Unavailable
+        $ui.CompactFiveHour.Text = $strings.FiveHour + ' --'
+        $ui.CompactFiveHourReset.Text = $strings.Unavailable
         $ui.CompactWeekly.Text = $strings.Weekly + ' --'
         $ui.CompactWeeklyReset.Text = $strings.Unavailable
         $ui.CompactCredits.Text = $strings.Unavailable
         $ui.CompactResetCount.Text = ''
+        $ui.MediumFiveHourText.Text = '--'; $ui.MediumFiveHourReset.Text = $strings.Unavailable; $ui.MediumFiveHourBar.Value = 0
         $ui.MediumWeeklyText.Text = '--'; $ui.MediumWeeklyReset.Text = $strings.Unavailable
         $ui.MediumCredits.Text = $strings.Unavailable
         $ui.MediumResetCount.Text = ''
@@ -1122,11 +1145,15 @@ function Update-Display {
         Update-ResponsiveLayout
         return
     }
+    $fiveHourAvailable = ($null -ne $data.PrimaryRemaining)
+    $fiveHourValue = if ($fiveHourAvailable) { [int]$data.PrimaryRemaining } else { 0 }
+    $fiveHourDisplay = if ($fiveHourAvailable) { "$fiveHourValue%" } else { '--' }
+    $fiveHourResetText = if ($fiveHourAvailable) { Format-ResetTime $data.PrimaryResetAt } else { $strings.Unavailable }
     $weeklyAvailable = ($null -ne $data.SecondaryRemaining)
     $weeklyValue = if ($weeklyAvailable) { [int]$data.SecondaryRemaining } else { 0 }
     $weeklyDisplay = if ($weeklyAvailable) { "$weeklyValue%" } else { '--' }
     $weeklyResetText = if ($weeklyAvailable) { Format-ResetTime $data.SecondaryResetAt } else { $strings.Unavailable }
-    $ui.WeeklyBar.Value = $weeklyValue
+    $ui.FiveHourBar.Value = $fiveHourValue; $ui.WeeklyBar.Value = $weeklyValue
     $ui.Card.ToolTip = $null
     $creditDetailLines = @()
     $creditDetailItems = @()
@@ -1137,7 +1164,9 @@ function Update-Display {
         $creditCountText = $strings.Credits + ' ' + $data.ResetCredits
         if ($null -ne $data.PSObject.Properties['ResetCreditDetails']) {
             foreach ($credit in @($data.ResetCreditDetails)) {
-                $typeText = if ([string]$credit.Type -eq 'Full reset') { $strings.CreditType } else { [string]$credit.Type }
+                $rawType = ([string]$credit.Type).Trim()
+                $normalizedType = ($rawType -replace '\s*[\(（]\s*(?:weekly\s*\+\s*5\s*(?:hr|hour)|5\s*(?:hr|hour)\s*\+\s*weekly|每周\s*\+\s*5\s*小时|5\s*小时\s*\+\s*每周)\s*[\)）]\s*$', '').Trim()
+                $typeText = if ($normalizedType -match '^(?i:full\s*reset)$' -or $normalizedType -eq '全额重置') { $strings.CreditType } else { $normalizedType }
                 $expiryText = if ($Language -eq 'en-US') { ([datetime]$credit.ExpiresAt).ToString('MMM d HH:mm', [Globalization.CultureInfo]::GetCultureInfo('en-US')) } else { ([datetime]$credit.ExpiresAt).ToString('M月d日 HH:mm') }
                 $creditDetailLines += ('{0} · {1} {2}' -f $typeText, $strings.Expires, $expiryText)
                 $creditDetailItems += [pscustomobject]@{ Type = $typeText; Expiry = ($strings.Expires + ' ' + $expiryText); ExpiryCompact = $expiryText }
@@ -1155,17 +1184,45 @@ function Update-Display {
     $ui.CompactCredits.Text = $compactCreditText
     $ui.MediumCredits.Text = $compactCreditText
     Update-CreditDetailPanel -Rebuild
+    $ui.FiveHourText.Text = $fiveHourDisplay; $ui.FiveHourReset.Text = $fiveHourResetText
+    $ui.CompactFiveHour.Text = $strings.FiveHour + ' ' + $fiveHourDisplay
+    $ui.CompactFiveHourReset.Text = $fiveHourResetText
+    $ui.MediumFiveHourText.Text = $fiveHourDisplay
+    $ui.MediumFiveHourBar.Value = $fiveHourValue
+    $ui.MediumFiveHourReset.Text = $fiveHourResetText
     $ui.WeeklyText.Text = $weeklyDisplay; $ui.WeeklyReset.Text = $weeklyResetText
     $ui.CompactWeekly.Text = $strings.Weekly + ' ' + $weeklyDisplay
     $ui.CompactWeeklyReset.Text = $weeklyResetText
     $ui.MediumWeeklyText.Text = $weeklyDisplay
     $ui.MediumWeeklyBar.Value = $weeklyValue
     $ui.MediumWeeklyReset.Text = $weeklyResetText
-    if (-not $weeklyAvailable) { Set-QuotaState -State 'unknown' }
-    elseif ($weeklyValue -le 5) { Set-QuotaState -State 'critical' }
-    elseif ($weeklyValue -le 20) { Set-QuotaState -State 'low' }
-    elseif ($weeklyValue -lt 50) { Set-QuotaState -State 'saving' }
+    if (-not $fiveHourAvailable) { Set-QuotaState -State 'unknown' }
+    elseif ($fiveHourValue -le 5) { Set-QuotaState -State 'critical' }
+    elseif ($fiveHourValue -le 20) { Set-QuotaState -State 'low' }
+    elseif ($fiveHourValue -lt 50) { Set-QuotaState -State 'saving' }
     else { Set-QuotaState -State 'normal' }
+    $fiveHourState = if (-not $fiveHourAvailable) { 'unknown' } elseif ($fiveHourValue -le 5) { 'critical' } elseif ($fiveHourValue -le 20) { 'low' } elseif ($fiveHourValue -lt 50) { 'saving' } else { 'normal' }
+    $fiveHourColor = switch ($fiveHourState) {
+        'critical' { if ($script:currentTheme.IsDark) { '#FF7B7B' } else { '#B91C1C' } }
+        'low' { if ($script:currentTheme.IsDark) { '#FF746B' } else { '#FF3B30' } }
+        'saving' { if ($script:currentTheme.IsDark) { '#FFDA45' } else { '#FFCC00' } }
+        'normal' { if ($script:currentTheme.IsDark) { '#4ADE80' } else { '#34C759' } }
+        default { if ($script:currentTheme.IsDark) { '#CBD5E1' } else { '#8E8E93' } }
+    }
+    $fiveHourBrush = New-ThemeBrush $fiveHourColor
+    $ui.FiveHourBar.Foreground = $fiveHourBrush; $ui.MediumFiveHourBar.Foreground = $fiveHourBrush
+    $ui.FiveHourText.Foreground = $fiveHourBrush; $ui.CompactFiveHour.Foreground = $fiveHourBrush; $ui.MediumFiveHourText.Foreground = $fiveHourBrush
+    $weeklyState = if (-not $weeklyAvailable) { 'unknown' } elseif ($weeklyValue -le 5) { 'critical' } elseif ($weeklyValue -le 20) { 'low' } elseif ($weeklyValue -lt 50) { 'saving' } else { 'normal' }
+    $weeklyColor = switch ($weeklyState) {
+        'critical' { if ($script:currentTheme.IsDark) { '#FF7B7B' } else { '#B91C1C' } }
+        'low' { if ($script:currentTheme.IsDark) { '#FF746B' } else { '#FF3B30' } }
+        'saving' { if ($script:currentTheme.IsDark) { '#FFDA45' } else { '#FFCC00' } }
+        'normal' { if ($script:currentTheme.IsDark) { '#4ADE80' } else { '#34C759' } }
+        default { if ($script:currentTheme.IsDark) { '#CBD5E1' } else { '#8E8E93' } }
+    }
+    $weeklyBrush = New-ThemeBrush $weeklyColor
+    $ui.WeeklyBar.Foreground = $weeklyBrush; $ui.MediumWeeklyBar.Foreground = $weeklyBrush
+    $ui.WeeklyText.Foreground = $weeklyBrush; $ui.CompactWeekly.Foreground = $weeklyBrush; $ui.MediumWeeklyText.Foreground = $weeklyBrush
     Update-ResponsiveLayout
 }
 
@@ -1185,11 +1242,6 @@ function Set-QuotaState {
     $ui.CompactDot.Fill = $settings[0]
     $ui.MediumDot.Fill = $settings[0]
     $quotaBrush = [Windows.Media.BrushConverter]::new().ConvertFromString($settings[0])
-    $ui.WeeklyBar.Foreground = $quotaBrush
-    $ui.MediumWeeklyBar.Foreground = $quotaBrush
-    $ui.WeeklyText.Foreground = $quotaBrush
-    $ui.CompactWeekly.Foreground = $quotaBrush
-    $ui.MediumWeeklyText.Foreground = $quotaBrush
     $animation = New-Object Windows.Media.Animation.DoubleAnimation
     $animation.From = 0.28; $animation.To = 1.0
     $animation.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds([double]$settings[1]))
@@ -1514,31 +1566,31 @@ function Update-ResponsiveLayout {
         $mediumCompact = ($currentWidth -ge 120 -and $currentWidth -lt 185)
         $responsiveFont = [Math]::Max(7.5, [Math]::Min(19.5, 7.5 + (($currentWidth - 80.0) * 0.03)))
         if ($ultraCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.FiveHourRow.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
             $ui.CompactPanel.Visibility = 'Visible'; $ui.MediumPanel.Visibility = 'Collapsed'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
             $fontSize = $responsiveFont
-            $ui.CompactTitle.FontSize = $fontSize; $ui.CompactWeekly.FontSize = $fontSize
-            $ui.CompactWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
+            $ui.CompactTitle.FontSize = $fontSize; $ui.CompactFiveHour.FontSize = $fontSize; $ui.CompactWeekly.FontSize = $fontSize
+            $ui.CompactFiveHourReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5); $ui.CompactWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
             $ui.CompactResetCount.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
             Update-CreditDetailPanel -FontSize 8.5
             $availableWidth = [Math]::Max(60.0, $currentWidth - 10.0)
             $ui.CompactPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
             $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.CompactPanel.DesiredSize.Height + 10.0)))
         } elseif ($mediumCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
+            $ui.DragArea.Visibility = 'Collapsed'; $ui.FiveHourRow.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Visible'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
             $fontSize = $responsiveFont
-            $ui.MediumTitle.FontSize = $fontSize + 0.5; $ui.MediumWeeklyLabel.FontSize = $fontSize; $ui.MediumWeeklyText.FontSize = $fontSize
-            $ui.MediumWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
+            $ui.MediumTitle.FontSize = $fontSize + 0.5; $ui.MediumFiveHourLabel.FontSize = $fontSize; $ui.MediumFiveHourText.FontSize = $fontSize; $ui.MediumWeeklyLabel.FontSize = $fontSize; $ui.MediumWeeklyText.FontSize = $fontSize
+            $ui.MediumFiveHourReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0); $ui.MediumWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
             $ui.MediumResetCount.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
             Update-CreditDetailPanel -FontSize 8.5
             $availableWidth = [Math]::Max(100.0, $currentWidth - 10.0)
             $ui.MediumPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
             $targetHeight = [Math]::Max(82.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.MediumPanel.DesiredSize.Height + 10.0)))
         } else {
-            $ui.DragArea.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsPanel.Visibility = 'Visible'
+            $ui.DragArea.Visibility = 'Visible'; $ui.FiveHourRow.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsPanel.Visibility = 'Visible'
             $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Collapsed'
             $ui.RootGrid.Margin = [Windows.Thickness]::new(5); $ui.Card.Padding = [Windows.Thickness]::new(8,6,8,6)
             $scale = $responsiveFont / 12.0
@@ -1546,14 +1598,15 @@ function Update-ResponsiveLayout {
             $ui.Updated.FontSize = 9.0 * $scale; $ui.ResetCountText.FontSize = 9.0 * $scale
             $dotSize = 7.0 * $scale
             $ui.PulseDot.Width = $dotSize; $ui.PulseDot.Height = $dotSize; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,7.0 * $scale,0)
-            $ui.WeeklyLabel.FontSize = 11.5 * $scale; $ui.WeeklyText.FontSize = 12.0 * $scale
+            $ui.FiveHourLabel.FontSize = 11.5 * $scale; $ui.FiveHourText.FontSize = 12.0 * $scale
+            $ui.FiveHourReset.FontSize = 9.0 * $scale; $ui.WeeklyLabel.FontSize = 11.5 * $scale; $ui.WeeklyText.FontSize = 12.0 * $scale
             $ui.WeeklyReset.FontSize = 9.0 * $scale; $ui.CreditDetailsText.FontSize = 8.5 * $scale
-            $ui.TitleRow.Height = [Windows.GridLength]::new(21.0 * $scale); $ui.WeeklyMainRow.Height = [Windows.GridLength]::new(30.0 * $scale)
+            $ui.TitleRow.Height = [Windows.GridLength]::new(21.0 * $scale); $ui.FiveHourMainRow.Height = [Windows.GridLength]::new(30.0 * $scale); $ui.WeeklyMainRow.Height = [Windows.GridLength]::new(30.0 * $scale)
             $effectiveCreditLines = $script:creditDetailLineCount
             Update-CreditDetailPanel -FontSize (8.5 * $scale)
-            $targetHeight = [Math]::Min($window.MaxHeight, 18.0 + (51.0 * $scale) + (13.0 * $scale * $effectiveCreditLines))
+            $targetHeight = [Math]::Min($window.MaxHeight, 18.0 + (81.0 * $scale) + (13.0 * $scale * $effectiveCreditLines))
         }
-        $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($targetHeight)))
+        $targetHeight = [Math]::Max(92.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($targetHeight)))
         $window.MinHeight = $targetHeight; $script:targetContentHeight = $targetHeight
         if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
     } finally { $script:adjustingResponsiveSize = $false }
@@ -1632,6 +1685,10 @@ if ($ValidateUI) {
     }
     Write-Output 'UI_OK'
     Write-Output ('COLOR=' + $ui.PulseDot.Fill.ToString())
+    Write-Output ('FIVE_HOUR_TEXT=' + $ui.FiveHourText.Text)
+    Write-Output ('FIVE_HOUR_RESET=' + $ui.FiveHourReset.Text)
+    Write-Output ('FIVE_HOUR_COLOR=' + $ui.FiveHourText.Foreground.ToString())
+    Write-Output ('FIVE_HOUR_BAR_COLOR=' + $ui.FiveHourBar.Foreground.ToString())
     Write-Output ('WEEKLY_COLOR=' + $ui.WeeklyText.Foreground.ToString())
     Write-Output ('WEEKLY_BAR_COLOR=' + $ui.WeeklyBar.Foreground.ToString())
     Write-Output ('THEME=' + $script:currentTheme.Name)

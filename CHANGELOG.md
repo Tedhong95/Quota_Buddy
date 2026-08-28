@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.0 - 2026-08-28
+
+- Restored the current 5-hour and weekly quota display confirmed by the latest ChatGPT desktop usage rules.
+- Added separate progress bars, remaining percentages, reset times, and responsive compact layouts for both quota windows.
+- Changed the breathing indicator to follow the 5-hour remaining quota while each quota row keeps its own status color.
+- Simplified reset-credit labels by removing redundant `(weekly+5hr)` suffixes while preserving the full expiration time.
+
 ## v0.4.0 - 2026-08-03
 
 - Added panel color presets based on the requested RGB palette, plus black, a native color picker, direct HEX input, automatic high-contrast text, and one-click default restoration.
