@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.0.0 - 2026-11-25
+
+- Added a soft quota-colored halo with corrected glow bounds and four instant breathing choices (off by default), using a 50%–100% opacity range.
+- Added categorized named color collections with HEX values, swatches, selected-state indicators and custom color entry.
+- Refined centered reset details, proportional typography and the borderless rounded detail panel.
+- Included the desktop promotional video with the release.
+
+- Replaced the rectangular panel with a smaller circular-quota and rounded-detail layout while preserving both quotas, reset times, and reset-credit details.
+- Matched the circular border and breathing glow to the 5-hour quota status color.
+- Added automatic hiding at all four display edges; moving the pointer back to the narrow visible edge restores the panel for dragging.
+- Preserved pet following, custom colors, multilingual display, resizing, topmost behavior, and multi-monitor positioning.
+
 ## v1.0.0 - 2026-08-28
 
 - Restored the current 5-hour and weekly quota display confirmed by the latest ChatGPT desktop usage rules.

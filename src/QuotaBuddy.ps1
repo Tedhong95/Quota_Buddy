@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$Once,
     [switch]$ValidateUI,
+    [string]$ValidateImage = '',
     [double]$ValidateWidth = 0,
     [string]$ValidateTheme = '',
     [string]$ValidateHexColor = '',
@@ -67,6 +68,12 @@ $script:lastValidPetState = $null
 $script:lastPetStateFailureLog = [datetime]::MinValue
 $script:lastPetStateStamp = $null
 $script:followPetEnabled = $FollowPet
+$script:breathingMode = 0
+$script:dockedEdge = $null
+$script:dockVisiblePosition = $null
+$script:edgeRevealSize = 8.0
+$script:edgeDockThreshold = 18.0
+$script:restoringFromEdge = $false
 
 function Read-TailText {
     param([string]$Path, [int]$MaxBytes = 8388608)
@@ -352,7 +359,7 @@ function Start-OfficialClient {
     if (-not $started -or $null -eq $process) { throw 'Unable to start Codex quota service' }
     $script:officialProcess = $process
 
-    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='1.0.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
+    $initialize = @{ method='initialize'; id=1; params=@{ clientInfo=@{ name='quota-buddy'; title='Quota Buddy'; version='2.0.0' }; capabilities=@{} } } | ConvertTo-Json -Compress -Depth 6
     $process.StandardInput.WriteLine($initialize)
     $process.StandardInput.Flush()
     $initialized = $false
@@ -777,6 +784,10 @@ public static class QuotaBuddyWindowProbe
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO info);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MONITORINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public uint dwFlags; }
 
     private static bool IsSupportedDesktopProcess(Process process)
     {
@@ -799,6 +810,15 @@ public static class QuotaBuddyWindowProbe
     {
         ReleaseCapture();
         SendMessage(hWnd, 0xA1, (IntPtr)hitTest, IntPtr.Zero);
+    }
+
+    public static int[] GetWorkArea(IntPtr hWnd)
+    {
+        IntPtr monitor = MonitorFromWindow(hWnd, 2);
+        MONITORINFO info = new MONITORINFO();
+        info.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+        if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return null;
+        return new int[] { info.rcWork.Left, info.rcWork.Top, info.rcWork.Right, info.rcWork.Bottom };
     }
 
     public static int[] FindVisibleCodexWindow(int width, int height)
@@ -870,13 +890,49 @@ $strings = if ($Language -eq 'en-US') {
 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- Width="246" Height="148" MinWidth="80" MinHeight="92" MaxWidth="480" MaxHeight="280" ShowActivated="False"
+ Width="300" Height="128" MinWidth="190" MinHeight="72" MaxWidth="480" MaxHeight="204" ShowActivated="False"
  WindowStyle="None" AllowsTransparency="True" Background="Transparent" Topmost="True" ShowInTaskbar="False"
  ResizeMode="CanResizeWithGrip" Left="1550" Top="680">
- <Grid x:Name="RootGrid" Margin="5" UseLayoutRounding="True" SnapsToDevicePixels="True" RenderOptions.ClearTypeHint="Enabled">
-  <Border x:Name="Card" CornerRadius="12" Background="#F4FFFFFF" BorderBrush="#26000000" BorderThickness="1" Padding="8,6,8,6">
-   <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.20"/></Border.Effect>
-   <Grid>
+ <Grid x:Name="RootGrid" Margin="2" UseLayoutRounding="True" SnapsToDevicePixels="True" RenderOptions.ClearTypeHint="Enabled">
+  <Border x:Name="Card" Background="Transparent" BorderThickness="0" Padding="0">
+   <Grid Cursor="SizeAll">
+    <Viewbox x:Name="PillView" Stretch="Uniform" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+     <Grid Width="348" Height="178" ClipToBounds="False">
+     <Grid Width="320" Height="150" Margin="14" ClipToBounds="False">
+      <Border x:Name="RightPill" Width="220" Height="128" Margin="98,11,2,11" HorizontalAlignment="Right" CornerRadius="0,64,64,0" Background="#F4FFFFFF" BorderBrush="#26000000" BorderThickness="1" Padding="48,6,16,6">
+       <Border.Clip><CombinedGeometry GeometryCombineMode="Exclude"><CombinedGeometry.Geometry1><RectangleGeometry Rect="0,0,220,128"/></CombinedGeometry.Geometry1><CombinedGeometry.Geometry2><EllipseGeometry Center="-23,64" RadiusX="71" RadiusY="71"/></CombinedGeometry.Geometry2></CombinedGeometry></Border.Clip>
+       <Grid VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform><TranslateTransform X="-4"/></Grid.RenderTransform>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <DockPanel HorizontalAlignment="Center">
+         <TextBlock x:Name="PillResetCount" FontSize="14" FontWeight="SemiBold" Foreground="#272B31" HorizontalAlignment="Center" TextAlignment="Center"/>
+         <TextBlock x:Name="PillUpdated" Visibility="Collapsed"/>
+        </DockPanel>
+        <TextBlock x:Name="PillFiveHourReset" Visibility="Collapsed"/>
+        <TextBlock x:Name="PillWeeklyReset" Visibility="Collapsed"/>
+        <StackPanel x:Name="PillCreditDetailsPanel" Grid.Row="3" VerticalAlignment="Center" Margin="0,4,0,0"/>
+       </Grid>
+      </Border>
+      <Path x:Name="CircleGlow" Width="178" Height="178" Margin="-14,-14,0,0" HorizontalAlignment="Left" VerticalAlignment="Top" Fill="Transparent" Stroke="#34C759" StrokeThickness="15" StrokeLineJoin="Round" IsHitTestVisible="False">
+       <Path.Data><PathGeometry Figures="M 75,4 C 93,1 107,12 119,22 C 134,32 140,48 145,65 C 151,84 140,99 132,113 C 122,131 105,138 87,145 C 69,150 51,141 36,133 C 18,125 12,108 6,91 C 0,73 8,55 14,40 C 23,22 38,16 53,8 C 62,3 68,3 75,4 Z"><PathGeometry.Transform><TranslateTransform X="14" Y="14"/></PathGeometry.Transform></PathGeometry></Path.Data>
+       <Path.Effect><BlurEffect Radius="6"/></Path.Effect>
+      </Path>
+      <Ellipse x:Name="CircleRing" Width="146" Height="146" HorizontalAlignment="Left" Margin="2" Fill="White" Stroke="#34C759" StrokeThickness="0"/>
+      <Ellipse x:Name="CircleCore" Visibility="Collapsed"/>
+      <StackPanel Width="132" Margin="9,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center">
+       <TextBlock x:Name="CircleFiveHourLabel" Visibility="Collapsed"/>
+       <TextBlock x:Name="CircleFiveHourText" FontSize="28" FontWeight="Normal" Foreground="#34C759" HorizontalAlignment="Center"/>
+       <TextBlock x:Name="CircleFiveHourTime" FontSize="14" HorizontalAlignment="Center"/>
+       <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+        <TextBlock x:Name="CircleWeeklyLabel" FontSize="14" Foreground="#656B75" Margin="0,0,8,0"/>
+        <TextBlock x:Name="CircleWeeklyText" FontSize="14" Foreground="#353A42"/>
+       </StackPanel>
+       <TextBlock x:Name="CircleWeeklyTime" FontSize="14" HorizontalAlignment="Center"/>
+      </StackPanel>
+     </Grid>
+     </Grid>
+    </Viewbox>
+    <Grid x:Name="LegacyPanel" Visibility="Collapsed">
      <Grid.RowDefinitions><RowDefinition x:Name="TitleRow" Height="21"/><RowDefinition x:Name="FiveHourMainRow" Height="30"/><RowDefinition x:Name="WeeklyMainRow" Height="30"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid x:Name="DragArea" Cursor="SizeAll">
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -924,7 +980,8 @@ $strings = if ($Language -eq 'en-US') {
      <TextBlock x:Name="MediumCredits" Visibility="Collapsed"/>
      <StackPanel x:Name="MediumCreditDetailsPanel" HorizontalAlignment="Center" Margin="0,1,0,0"/>
     </StackPanel>
-   </Grid>
+    </Grid>
+    </Grid>
   </Border>
   <Border x:Name="RightResizeHandle" HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="7" Background="Transparent" Cursor="SizeWE" ToolTip="拖动调整宽度"/>
   <Border x:Name="BottomResizeHandle" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="7" Background="Transparent" Cursor="SizeNS" ToolTip="拖动调整高度"/>
@@ -937,9 +994,19 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 if ($ValidateUI -and $ValidateWidth -gt 0) {
     $window.Width = [Math]::Max($window.MinWidth, [Math]::Min($window.MaxWidth, $ValidateWidth))
 }
-$names = 'RootGrid','Card','TitleRow','FiveHourMainRow','WeeklyMainRow','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','FiveHourRow','FiveHourLabel','FiveHourBar','FiveHourText','FiveHourReset','WeeklyRow','CreditDetailsText','CreditDetailsPanel','CompactPanel','CompactDot','CompactTitle','CompactFiveHour','CompactFiveHourReset','CompactWeekly','CompactWeeklyReset','CompactResetCount','CompactCredits','CompactCreditDetailsPanel','MediumPanel','MediumDot','MediumTitle','MediumFiveHourLabel','MediumFiveHourText','MediumFiveHourBar','MediumFiveHourReset','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumResetCount','MediumCredits','MediumCreditDetailsPanel','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
+$names = 'RootGrid','Card','PillView','RightPill','CircleGlow','CircleRing','CircleCore','CircleFiveHourLabel','CircleFiveHourText','CircleWeeklyLabel','CircleWeeklyText','PillResetCount','PillUpdated','PillFiveHourReset','PillWeeklyReset','PillCreditDetailsPanel','LegacyPanel','TitleRow','FiveHourMainRow','WeeklyMainRow','RightResizeHandle','BottomResizeHandle','ResizeHandle','DragArea','FiveHourRow','FiveHourLabel','FiveHourBar','FiveHourText','FiveHourReset','WeeklyRow','CreditDetailsText','CreditDetailsPanel','CompactPanel','CompactDot','CompactTitle','CompactFiveHour','CompactFiveHourReset','CompactWeekly','CompactWeeklyReset','CompactResetCount','CompactCredits','CompactCreditDetailsPanel','MediumPanel','MediumDot','MediumTitle','MediumFiveHourLabel','MediumFiveHourText','MediumFiveHourBar','MediumFiveHourReset','MediumWeeklyLabel','MediumWeeklyText','MediumWeeklyBar','MediumWeeklyReset','MediumResetCount','MediumCredits','MediumCreditDetailsPanel','ResetCountText','Updated','PulseDot','TitleText','WeeklyLabel','WeeklyBar','WeeklyText','WeeklyReset'
 $ui = @{}; foreach ($name in $names) { $ui[$name] = $window.FindName($name) }
+$ui.CircleFiveHourTime = $window.FindName('CircleFiveHourTime')
+$ui.CircleWeeklyTime = $window.FindName('CircleWeeklyTime')
+$script:edgeMarker = New-Object Windows.Controls.Border
+$script:edgeMarker.Background = [Windows.Media.Brushes]::DodgerBlue
+$script:edgeMarker.CornerRadius = 4
+$script:edgeMarker.Visibility = 'Collapsed'
+$script:edgeMarker.ToolTip = '额度伴侣 · 移入展开，按住拖动'
+[void]$ui.RootGrid.Children.Add($script:edgeMarker)
 $ui.TitleText.Text = $strings.Title
+$ui.CircleFiveHourLabel.Text = if ($Language -eq 'en-US') { '5h' } else { '5小时' }
+$ui.CircleWeeklyLabel.Text = $strings.Weekly
 $ui.FiveHourLabel.Text = $strings.FiveHour
 $ui.WeeklyLabel.Text = $strings.Weekly
 $ui.CompactTitle.Text = $strings.Title
@@ -1000,7 +1067,7 @@ function Save-Appearance([string]$Theme, [string]$CustomColor = '') {
     try {
         $folder = Split-Path $script:appearancePath -Parent
         if (-not (Test-Path -LiteralPath $folder)) { [void](New-Item -ItemType Directory -Path $folder -Force) }
-        @{ Theme=$Theme; CustomColor=$CustomColor; FollowPet=$script:followPetEnabled } | ConvertTo-Json -Compress | Set-Content -LiteralPath $script:appearancePath -Encoding UTF8
+        @{ Theme=$Theme; CustomColor=$CustomColor; FollowPet=$script:followPetEnabled; BreathingMode=$script:breathingMode } | ConvertTo-Json -Compress | Set-Content -LiteralPath $script:appearancePath -Encoding UTF8
     } catch { }
 }
 
@@ -1009,8 +1076,18 @@ function Apply-Appearance([string]$Theme, [string]$CustomColor = '', [switch]$Pe
     $script:currentTheme = $palette
     $script:currentCustomColor = $CustomColor
     $script:themeMutedBrush = New-ThemeBrush $palette.Muted
-    $ui.Card.Background = New-ThemeBrush $palette.Background
-    $ui.Card.BorderBrush = New-ThemeBrush $palette.Border
+    $script:pillTextBrush = New-ThemeBrush $palette.Muted
+    $ui.Card.Background = [Windows.Media.Brushes]::Transparent
+    $ui.Card.BorderBrush = [Windows.Media.Brushes]::Transparent
+    $ui.RightPill.Background = New-ThemeBrush $palette.Background
+    $ui.RightPill.BorderBrush = [Windows.Media.Brushes]::Transparent
+    $ui.RightPill.BorderThickness = 0
+    $ui.CircleRing.Fill = New-ThemeBrush $palette.Background
+    $ui.CircleCore.Fill = New-ThemeBrush $palette.Background
+    $ui.PillResetCount.Foreground = New-ThemeBrush $palette.Primary
+    $ui.PillUpdated.Foreground = New-ThemeBrush $palette.Soft
+    foreach ($name in @('PillFiveHourReset','PillWeeklyReset','CircleFiveHourLabel','CircleWeeklyLabel')) { $ui[$name].Foreground = New-ThemeBrush $palette.Muted }
+    $ui.CircleWeeklyText.Foreground = New-ThemeBrush $palette.Secondary
     foreach ($name in @('TitleText','CompactTitle','MediumTitle')) { $ui[$name].Foreground = New-ThemeBrush $palette.Primary }
     foreach ($name in @('FiveHourLabel','WeeklyLabel','MediumFiveHourLabel','MediumWeeklyLabel')) { $ui[$name].Foreground = New-ThemeBrush $palette.Secondary }
     foreach ($name in @('ResetCountText','Updated','FiveHourReset','WeeklyReset','CompactFiveHourReset','CompactWeeklyReset','CompactResetCount','MediumFiveHourReset','MediumWeeklyReset','MediumResetCount')) { $ui[$name].Foreground = New-ThemeBrush $palette.Muted }
@@ -1037,6 +1114,7 @@ if (-not $ValidateUI -and (Test-Path -LiteralPath $script:appearancePath)) {
         if ($null -ne $savedAppearance.Theme) { $savedTheme = [string]$savedAppearance.Theme }
         if ($null -ne $savedAppearance.CustomColor) { $savedCustomColor = [string]$savedAppearance.CustomColor }
         if ($null -ne $savedAppearance.PSObject.Properties['FollowPet']) { $script:followPetEnabled = [bool]$savedAppearance.FollowPet }
+        if ($null -ne $savedAppearance.PSObject.Properties['BreathingMode']) { $script:breathingMode = [Math]::Max(0,[Math]::Min(3,[int]$savedAppearance.BreathingMode)) }
     } catch { }
 }
 if ($ValidateUI -and -not [string]::IsNullOrWhiteSpace($ValidateTheme)) { $savedTheme = $ValidateTheme; if ($ValidateTheme -eq 'custom') { $savedCustomColor = '#18324A' } }
@@ -1112,6 +1190,35 @@ function Update-CreditDetailPanel([double]$FontSize = 8.5, [switch]$Rebuild) {
     }
 }
 
+function Update-PillCreditDetails {
+    $ui.PillCreditDetailsPanel.Children.Clear()
+    $items = @($script:creditDetailItems)
+    if ($items.Count -eq 0) {
+        $line = New-Object Windows.Controls.TextBlock
+        $line.Text = $ui.CreditDetailsText.Text; $line.FontSize = 8; $line.Foreground = $script:themeMutedBrush
+        $line.TextTrimming = 'CharacterEllipsis'
+        [void]$ui.PillCreditDetailsPanel.Children.Add($line)
+        return
+    }
+    foreach ($item in $items) {
+        $line = New-Object Windows.Controls.StackPanel
+        $line.HorizontalAlignment = 'Center'
+        $line.Margin = [Windows.Thickness]::new(0,2,0,2)
+        $date = New-Object Windows.Controls.TextBlock
+        $date.Text = $item.ExpiryCompact; $date.FontSize = 13; $date.Foreground = $script:pillTextBrush
+        $date.HorizontalAlignment = 'Center'
+        $date.TextAlignment = 'Center'
+        $date.Margin = [Windows.Thickness]::new(0,2,0,0)
+        $label = New-Object Windows.Controls.TextBlock
+        $label.Text = $item.Type; $label.FontSize = 13; $label.Foreground = $script:pillTextBrush
+        $label.HorizontalAlignment = 'Center'
+        $label.TextAlignment = 'Center'
+        [void]$line.Children.Add($label)
+        [void]$line.Children.Add($date)
+        [void]$ui.PillCreditDetailsPanel.Children.Add($line)
+    }
+}
+
 function Update-Display {
     param([switch]$FastStart)
     if ($FastStart) {
@@ -1121,7 +1228,12 @@ function Update-Display {
     }
     $ui.ResetCountText.Text = ''
     $ui.Updated.Text = [datetime]::Now.ToString('HH:mm')
+    $ui.PillUpdated.Text = [datetime]::Now.ToString('HH:mm')
     if (-not $data.Available) {
+        $ui.CircleFiveHourText.Text = '--'; $ui.CircleWeeklyText.Text = '--'
+        $ui.PillResetCount.Text = $strings.Credits + ' --'
+        $ui.PillFiveHourReset.Text = $strings.FiveHour + ' · ' + $strings.Unavailable
+        $ui.PillWeeklyReset.Text = $strings.Weekly + ' · ' + $strings.Unavailable
         $ui.FiveHourText.Text = '--'; $ui.FiveHourReset.Text = $strings.Unavailable
         $ui.FiveHourBar.Value = 0
         $ui.WeeklyText.Text = '--'; $ui.WeeklyReset.Text = $strings.Unavailable
@@ -1138,6 +1250,7 @@ function Update-Display {
         $ui.CreditDetailsText.Text = $strings.Unavailable
         $script:creditDetailItems = @()
         Update-CreditDetailPanel -Rebuild
+        Update-PillCreditDetails
         $ui.MediumWeeklyBar.Value = 0
         $ui.Card.ToolTip = $data.Message
         $ui.WeeklyBar.Value = 0
@@ -1179,11 +1292,21 @@ function Update-Display {
     $script:wideCreditLines = if ($creditDetailLines.Count -gt 0) { @($creditDetailLines) } else { @($wideCreditText) }
     $script:creditDetailItems = @($creditDetailItems)
     $ui.CreditDetailsText.Text = $wideCreditText
+    $ui.CircleFiveHourText.Text = $fiveHourDisplay
+    $ui.CircleFiveHourTime.Text = $fiveHourResetText
+    $ui.CircleWeeklyTime.Text = $weeklyResetText
+    $ui.CircleFiveHourTime.Foreground = $script:themeMutedBrush
+    $ui.CircleWeeklyTime.Foreground = $script:themeMutedBrush
+    $ui.CircleWeeklyText.Text = $weeklyDisplay
+    $ui.PillResetCount.Text = $creditCountText
+    $ui.PillFiveHourReset.Text = $strings.FiveHour + ' · ' + $fiveHourResetText
+    $ui.PillWeeklyReset.Text = $strings.Weekly + ' · ' + $weeklyResetText
     $ui.CompactResetCount.Text = $creditCountText
     $ui.MediumResetCount.Text = $creditCountText
     $ui.CompactCredits.Text = $compactCreditText
     $ui.MediumCredits.Text = $compactCreditText
     Update-CreditDetailPanel -Rebuild
+    Update-PillCreditDetails
     $ui.FiveHourText.Text = $fiveHourDisplay; $ui.FiveHourReset.Text = $fiveHourResetText
     $ui.CompactFiveHour.Text = $strings.FiveHour + ' ' + $fiveHourDisplay
     $ui.CompactFiveHourReset.Text = $fiveHourResetText
@@ -1212,6 +1335,7 @@ function Update-Display {
     $fiveHourBrush = New-ThemeBrush $fiveHourColor
     $ui.FiveHourBar.Foreground = $fiveHourBrush; $ui.MediumFiveHourBar.Foreground = $fiveHourBrush
     $ui.FiveHourText.Foreground = $fiveHourBrush; $ui.CompactFiveHour.Foreground = $fiveHourBrush; $ui.MediumFiveHourText.Foreground = $fiveHourBrush
+    $ui.CircleFiveHourText.Foreground = $fiveHourBrush
     $weeklyState = if (-not $weeklyAvailable) { 'unknown' } elseif ($weeklyValue -le 5) { 'critical' } elseif ($weeklyValue -le 20) { 'low' } elseif ($weeklyValue -lt 50) { 'saving' } else { 'normal' }
     $weeklyColor = switch ($weeklyState) {
         'critical' { if ($script:currentTheme.IsDark) { '#FF7B7B' } else { '#B91C1C' } }
@@ -1223,12 +1347,13 @@ function Update-Display {
     $weeklyBrush = New-ThemeBrush $weeklyColor
     $ui.WeeklyBar.Foreground = $weeklyBrush; $ui.MediumWeeklyBar.Foreground = $weeklyBrush
     $ui.WeeklyText.Foreground = $weeklyBrush; $ui.CompactWeekly.Foreground = $weeklyBrush; $ui.MediumWeeklyText.Foreground = $weeklyBrush
+    $ui.CircleWeeklyText.Foreground = $weeklyBrush
     Update-ResponsiveLayout
 }
 
 function Set-QuotaState {
-    param([string]$State)
-    if ($script:lastVisualState -eq $State) { return }
+    param([string]$State, [switch]$Force)
+    if (-not $Force -and $script:lastVisualState -eq $State) { return }
     $script:lastVisualState = $State
     $darkTheme = ($null -ne $script:currentTheme -and $script:currentTheme.IsDark)
     $settings = switch ($State) {
@@ -1241,15 +1366,45 @@ function Set-QuotaState {
     $ui.PulseDot.Fill = $settings[0]
     $ui.CompactDot.Fill = $settings[0]
     $ui.MediumDot.Fill = $settings[0]
+    $ui.CircleRing.Stroke = (New-ThemeBrush $settings[0]).Clone()
+    $glowColor = if ($settings[0].StartsWith('#')) { '#28' + $settings[0].Substring($settings[0].Length - 6) } else { '#2834C759' }
+    $ui.CircleGlow.Fill = [Windows.Media.Brushes]::Transparent
+    $ui.CircleGlow.Stroke = New-ThemeBrush $settings[0]
     $quotaBrush = [Windows.Media.BrushConverter]::new().ConvertFromString($settings[0])
     $animation = New-Object Windows.Media.Animation.DoubleAnimation
-    $animation.From = 0.28; $animation.To = 1.0
+    $animation.From = 0.5; $animation.To = 1.0
     $animation.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds([double]$settings[1]))
     $animation.AutoReverse = $true
     $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
     $ui.PulseDot.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
     $ui.CompactDot.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
     $ui.MediumDot.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
+    $ui.CircleRing.BeginAnimation([Windows.UIElement]::OpacityProperty, $null)
+    $ui.CircleRing.Opacity = 1
+    $ui.CircleRing.Stroke.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $animation)
+    $ui.CircleGlow.BeginAnimation([Windows.UIElement]::OpacityProperty, $animation)
+    $backgroundAnimation = $animation.Clone()
+    $backgroundAnimation.From = 0.5; $backgroundAnimation.To = 1.0
+    $ui.CircleRing.Fill = $ui.CircleRing.Fill.Clone()
+    $ui.CircleRing.Fill.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $backgroundAnimation)
+    $ui.RightPill.Background = $ui.RightPill.Background.Clone()
+    $ui.RightPill.Background.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $backgroundAnimation)
+    if ($script:breathingMode -eq 0) {
+        $ui.CircleRing.Stroke.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $null)
+        $ui.CircleRing.Stroke.Opacity = 1
+    }
+    if ($script:breathingMode -lt 2) {
+        $ui.CircleRing.Fill.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $null)
+        $ui.CircleRing.Fill.Opacity = 1
+    }
+    if ($script:breathingMode -lt 3) {
+        $ui.RightPill.Background.BeginAnimation([Windows.Media.Brush]::OpacityProperty, $null)
+        $ui.RightPill.Background.Opacity = 1
+    }
+    if ($script:breathingMode -eq 0) {
+        $ui.CircleGlow.BeginAnimation([Windows.UIElement]::OpacityProperty, $null)
+        $ui.CircleGlow.Opacity = 0.85
+    }
 }
 
 function Test-WindowIntersectsVirtualDesktop([double]$Left, [double]$Top, [double]$Width, [double]$Height) {
@@ -1263,6 +1418,7 @@ function Test-WindowIntersectsVirtualDesktop([double]$Left, [double]$Top, [doubl
 }
 
 function Move-WindowIntoVirtualDesktop {
+    if ($null -ne $script:dockedEdge) { return }
     $desktopLeft = [double][Windows.SystemParameters]::VirtualScreenLeft
     $desktopTop = [double][Windows.SystemParameters]::VirtualScreenTop
     $desktopRight = $desktopLeft + [double][Windows.SystemParameters]::VirtualScreenWidth
@@ -1284,9 +1440,11 @@ function Save-WindowPlacement {
         if (-not (Test-Path -LiteralPath $folder)) {
             [void](New-Item -ItemType Directory -Path $folder -Force)
         }
+        $saveLeft = if ($null -ne $script:dockedEdge -and $null -ne $script:dockVisiblePosition) { [double]$script:dockVisiblePosition.Left } else { [double]$window.Left }
+        $saveTop = if ($null -ne $script:dockedEdge -and $null -ne $script:dockVisiblePosition) { [double]$script:dockVisiblePosition.Top } else { [double]$window.Top }
         $placement = @{
-            Left = [Math]::Round([double]$window.Left, 2)
-            Top = [Math]::Round([double]$window.Top, 2)
+            Left = [Math]::Round($saveLeft, 2)
+            Top = [Math]::Round($saveTop, 2)
             Width = [Math]::Round([double]$window.Width, 2)
             Height = [Math]::Round([double]$window.Height, 2)
         } | ConvertTo-Json -Compress
@@ -1342,6 +1500,7 @@ function Test-CodexRunning {
 
 function Sync-WithOfficialPet {
     if (-not $script:followPetEnabled) { return $false }
+    if ($null -ne $script:dockedEdge) { return $true }
     $pet = Get-OfficialPetState
     if ($null -eq $pet -or -not $pet.Open) {
         return $false
@@ -1471,6 +1630,16 @@ function Show-CustomColorDialog {
 }
 
 $menu = New-Object Windows.Controls.ContextMenu
+$menu.FontFamily = 'Microsoft YaHei UI'
+$menu.FontSize = 12
+$menu.Background = New-ThemeBrush '#FFFDFDFE'
+$menu.Foreground = New-ThemeBrush '#FF252A34'
+$menu.BorderBrush = New-ThemeBrush '#FFE2E5EB'
+$menu.BorderThickness = 1
+$menu.Padding = 6
+$menuStyle = New-Object Windows.Style([Windows.Controls.MenuItem])
+$menuStyle.Setters.Add([Windows.Setter]::new([Windows.Controls.Control]::PaddingProperty,[Windows.Thickness]::new(10,7,12,7)))
+$menu.Resources.Add([Windows.Controls.MenuItem],$menuStyle)
 $colorMenu = New-Object Windows.Controls.MenuItem; $colorMenu.Header = $strings.Colors
 $colorChoices = @(
     @{ Header=$strings.DefaultColor; Theme='default'; Color='#FFFFFF' },
@@ -1493,6 +1662,47 @@ foreach ($choice in $colorChoices) {
     $item.Add_Click({ param($sender,$eventArgs) Apply-Appearance ([string]$sender.Tag) '' -Persist; Update-Display })
     [void]$colorMenu.Items.Add($item)
 }
+$colorMenu.Items.Clear()
+$defaultColorItem = New-Object Windows.Controls.MenuItem
+$defaultColorItem.Header = $strings.DefaultColor
+$defaultColorItem.Add_Click({ Apply-Appearance 'default' '' -Persist; Update-Display })
+[void]$colorMenu.Items.Add($defaultColorItem)
+[void]$colorMenu.Items.Add((New-Object Windows.Controls.Separator))
+. ([scriptblock]::Create([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'ColorCollections.ps1'),[Text.Encoding]::UTF8)))
+foreach ($collection in $script:colorCollections.GetEnumerator()) {
+    $group = New-Object Windows.Controls.MenuItem
+    $group.Header = $collection.Key
+    foreach ($token in ($collection.Value -split ' ')) {
+        $parts = $token -split ':'
+        $hex = '#' + $parts[1]
+        $entry = New-Object Windows.Controls.MenuItem
+        $entry.Header = $parts[0] + '   ' + $hex
+        $entry.Tag = $hex
+        $swatch = New-Object Windows.Controls.Border
+        $swatch.Width=16; $swatch.Height=16; $swatch.CornerRadius=4
+        $swatch.Background = New-ThemeBrush $hex
+        $swatch.BorderBrush = New-ThemeBrush '#22000000'; $swatch.BorderThickness=1
+        $entry.Icon=$swatch
+        $entry.Add_Click({
+            param($sender,$eventArgs)
+            Apply-Appearance 'custom' ([string]$sender.Tag) -Persist
+            Update-Display
+        })
+        [void]$group.Items.Add($entry)
+    }
+    [void]$colorMenu.Items.Add($group)
+}
+$colorMenu.Add_SubmenuOpened({
+    foreach ($group in $colorMenu.Items) {
+        if ($group -isnot [Windows.Controls.MenuItem]) { continue }
+        foreach ($entry in $group.Items) {
+            if ($entry -is [Windows.Controls.MenuItem]) {
+                $entry.IsCheckable=$true
+                $entry.IsChecked=([string]$entry.Tag -eq [string]$script:currentCustomColor -and $script:currentTheme.Name -eq 'custom')
+            }
+        }
+    }
+})
 $customColorItem = New-Object Windows.Controls.MenuItem; $customColorItem.Header = $strings.CustomColor
 $customColorItem.Add_Click({
     try {
@@ -1520,6 +1730,23 @@ $followPetItem.Add_Click({
     Save-Appearance $script:currentTheme.Name $script:currentCustomColor
 })
 $refreshItem = New-Object Windows.Controls.MenuItem; $refreshItem.Header = $strings.Refresh
+$breathingMenu = New-Object Windows.Controls.MenuItem
+$breathingMenu.Header = if ($Language -eq 'en-US') { 'Breathing effect' } else { '呼吸效果' }
+$breathingLabels = if ($Language -eq 'en-US') { @('Off · Default','Outline','Circle','Full panel') } else { @('关闭 · 默认','轮廓呼吸','圆环呼吸','全景呼吸') }
+for ($modeIndex=0; $modeIndex -le 3; $modeIndex++) {
+    $modeItem = New-Object Windows.Controls.MenuItem
+    $modeItem.Header = $breathingLabels[$modeIndex]; $modeItem.Tag = $modeIndex
+    $modeItem.IsCheckable = $true; $modeItem.IsChecked = ($script:breathingMode -eq $modeIndex)
+    $modeItem.Add_Click({
+        param($sender,$eventArgs)
+        $script:breathingMode = [int]$sender.Tag
+        foreach ($entry in $breathingMenu.Items) { $entry.IsChecked = ([int]$entry.Tag -eq $script:breathingMode) }
+        Set-QuotaState -State $script:lastVisualState -Force
+        Save-Appearance $script:currentTheme.Name $script:currentCustomColor
+    })
+    [void]$breathingMenu.Items.Add($modeItem)
+}
+[void]$menu.Items.Add($breathingMenu)
 $exitItem = New-Object Windows.Controls.MenuItem; $exitItem.Header = $strings.Exit
 [void]$menu.Items.Add($colorMenu); [void]$menu.Items.Add($followPetItem); [void]$menu.Items.Add((New-Object Windows.Controls.Separator)); [void]$menu.Items.Add($refreshItem); [void]$menu.Items.Add($exitItem)
 $refreshItem.Add_Click({ Update-Display }); $exitItem.Add_Click({ $window.Close() })
@@ -1532,10 +1759,105 @@ $window.Add_PreviewMouseRightButtonUp({
     $eventArgs.Handled = $true
 })
 function Start-QuotaBuddyDrag {
+    if ($null -ne $script:dockedEdge) { Show-WindowFromEdge }
     try { $window.DragMove() } catch { }
-    Move-WindowIntoVirtualDesktop
-    Save-WindowPlacement
+    if (-not (Dock-WindowAtNearestEdge)) {
+        Move-WindowIntoVirtualDesktop
+        Save-WindowPlacement
+    }
 }
+$script:edgeHovering = $false
+function Get-WindowWorkArea {
+    try {
+        $handle = New-Object Windows.Interop.WindowInteropHelper($window)
+        $area = [QuotaBuddyWindowProbe]::GetWorkArea($handle.Handle)
+        if ($null -ne $area -and $area.Length -eq 4) {
+            $source = [Windows.PresentationSource]::FromVisual($window)
+            if ($null -ne $source -and $null -ne $source.CompositionTarget) {
+                $transform = $source.CompositionTarget.TransformFromDevice
+                $start = $transform.Transform([Windows.Point]::new($area[0],$area[1]))
+                $end = $transform.Transform([Windows.Point]::new($area[2],$area[3]))
+                return @($start.X,$start.Y,$end.X,$end.Y)
+            }
+            return @([double]$area[0], [double]$area[1], [double]$area[2], [double]$area[3])
+        }
+    } catch { }
+    $area = [Windows.SystemParameters]::WorkArea
+    return @([double]$area.Left, [double]$area.Top, [double]$area.Right, [double]$area.Bottom)
+}
+function Hide-WindowToEdge {
+    if ($null -eq $script:dockedEdge) { return }
+    $script:edgeMarker.Visibility = 'Visible'
+    $script:edgeMarker.Width = 6; $script:edgeMarker.Height = 28
+    $script:edgeMarker.VerticalAlignment = 'Center'
+    $script:edgeMarker.HorizontalAlignment = if ($script:dockedEdge -eq 'left') { 'Right' } else { 'Left' }
+    if ($script:dockedEdge -in @('top','bottom')) {
+        $script:edgeMarker.Width = 28; $script:edgeMarker.Height = 6
+        $script:edgeMarker.HorizontalAlignment = 'Center'
+        $script:edgeMarker.VerticalAlignment = if ($script:dockedEdge -eq 'top') { 'Bottom' } else { 'Top' }
+    }
+    $area = $script:dockWorkArea
+    $left=$area[0]; $top=$area[1]; $right=$area[2]; $bottom=$area[3]
+    switch ($script:dockedEdge) {
+        'left'   { $window.Left = $left - $window.Width + $script:edgeRevealSize }
+        'right'  { $window.Left = $right - $script:edgeRevealSize }
+        'top'    { $window.Top = $top - $window.Height + $script:edgeRevealSize }
+        'bottom' { $window.Top = $bottom - $script:edgeRevealSize }
+    }
+}
+function Show-WindowFromEdge {
+    if ($null -eq $script:dockedEdge) { return }
+    $script:edgeMarker.Visibility = 'Collapsed'
+    $area = $script:dockWorkArea
+    switch ($script:dockedEdge) {
+        'left'   { $window.Left = $area[0] }
+        'right'  { $window.Left = $area[2] - $window.Width }
+        'top'    { $window.Top = $area[1] }
+        'bottom' { $window.Top = $area[3] - $window.Height }
+    }
+    $script:dockVisiblePosition = @{ Left=[double]$window.Left; Top=[double]$window.Top }
+    try { [void]$window.Activate(); [void]$window.Focus() } catch { }
+}
+function Dock-WindowAtNearestEdge {
+    $area = Get-WindowWorkArea
+    $candidates = @{}
+    if ($window.Left -le $area[0] + $script:edgeDockThreshold) { $candidates.left = [Math]::Abs($window.Left - $area[0]) }
+    if ($window.Left + $window.Width -ge $area[2] - $script:edgeDockThreshold) { $candidates.right = [Math]::Abs(($window.Left + $window.Width) - $area[2]) }
+    if ($window.Top -le $area[1] + $script:edgeDockThreshold) { $candidates.top = [Math]::Abs($window.Top - $area[1]) }
+    if ($window.Top + $window.Height -ge $area[3] - $script:edgeDockThreshold) { $candidates.bottom = [Math]::Abs(($window.Top + $window.Height) - $area[3]) }
+    $nearest = $candidates.GetEnumerator() | Sort-Object Value | Select-Object -First 1
+    if ($null -eq $nearest) {
+        $script:dockedEdge = $null; $script:dockVisiblePosition = $null
+        return $false
+    }
+    $script:dockedEdge = [string]$nearest.Key
+    $script:dockWorkArea = $area
+    switch ($script:dockedEdge) {
+        'left'   { $window.Left=$area[0]; $window.Top=[Math]::Max($area[1],[Math]::Min($window.Top,$area[3]-$window.Height)) }
+        'right'  { $window.Left=$area[2]-$window.Width; $window.Top=[Math]::Max($area[1],[Math]::Min($window.Top,$area[3]-$window.Height)) }
+        'top'    { $window.Top=$area[1]; $window.Left=[Math]::Max($area[0],[Math]::Min($window.Left,$area[2]-$window.Width)) }
+        'bottom' { $window.Top=$area[3]-$window.Height; $window.Left=[Math]::Max($area[0],[Math]::Min($window.Left,$area[2]-$window.Width)) }
+    }
+    $script:dockVisiblePosition = @{ Left=[double]$window.Left; Top=[double]$window.Top }
+    Save-WindowPlacement
+    Hide-WindowToEdge
+    return $true
+}
+$edgeHideTimer = New-Object Windows.Threading.DispatcherTimer
+$edgeHideTimer.Interval = [TimeSpan]::FromMilliseconds(550)
+$edgeHideTimer.Add_Tick({
+    $edgeHideTimer.Stop()
+    if ($null -ne $script:dockedEdge -and -not $script:edgeHovering) { Hide-WindowToEdge }
+})
+$window.Add_MouseEnter({
+    $script:edgeHovering = $true; $edgeHideTimer.Stop()
+    if ($null -ne $script:dockedEdge) { Show-WindowFromEdge }
+})
+$window.Add_MouseLeave({
+    $script:edgeHovering = $false
+    if ($null -ne $script:dockedEdge) { $edgeHideTimer.Stop(); $edgeHideTimer.Start() }
+})
+$ui.Card.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 $ui.DragArea.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 $ui.CompactPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
 $ui.MediumPanel.Add_MouseLeftButtonDown({ Start-QuotaBuddyDrag })
@@ -1562,51 +1884,8 @@ function Update-ResponsiveLayout {
     $script:adjustingResponsiveSize = $true
     try {
         $currentWidth = if ($window.ActualWidth -gt 0) { $window.ActualWidth } else { $window.Width }
-        $ultraCompact = ($currentWidth -lt 120)
-        $mediumCompact = ($currentWidth -ge 120 -and $currentWidth -lt 185)
-        $responsiveFont = [Math]::Max(7.5, [Math]::Min(19.5, 7.5 + (($currentWidth - 80.0) * 0.03)))
-        if ($ultraCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.FiveHourRow.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
-            $ui.CompactPanel.Visibility = 'Visible'; $ui.MediumPanel.Visibility = 'Collapsed'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = $responsiveFont
-            $ui.CompactTitle.FontSize = $fontSize; $ui.CompactFiveHour.FontSize = $fontSize; $ui.CompactWeekly.FontSize = $fontSize
-            $ui.CompactFiveHourReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5); $ui.CompactWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
-            $ui.CompactResetCount.FontSize = [Math]::Max(6.5, $fontSize - 0.5)
-            Update-CreditDetailPanel -FontSize 8.5
-            $availableWidth = [Math]::Max(60.0, $currentWidth - 10.0)
-            $ui.CompactPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
-            $targetHeight = [Math]::Max(72.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.CompactPanel.DesiredSize.Height + 10.0)))
-        } elseif ($mediumCompact) {
-            $ui.DragArea.Visibility = 'Collapsed'; $ui.FiveHourRow.Visibility = 'Collapsed'; $ui.WeeklyRow.Visibility = 'Collapsed'; $ui.CreditDetailsPanel.Visibility = 'Collapsed'
-            $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Visible'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(1); $ui.Card.Padding = [Windows.Thickness]::new(3)
-            $fontSize = $responsiveFont
-            $ui.MediumTitle.FontSize = $fontSize + 0.5; $ui.MediumFiveHourLabel.FontSize = $fontSize; $ui.MediumFiveHourText.FontSize = $fontSize; $ui.MediumWeeklyLabel.FontSize = $fontSize; $ui.MediumWeeklyText.FontSize = $fontSize
-            $ui.MediumFiveHourReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0); $ui.MediumWeeklyReset.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
-            $ui.MediumResetCount.FontSize = [Math]::Max(6.5, $fontSize - 1.0)
-            Update-CreditDetailPanel -FontSize 8.5
-            $availableWidth = [Math]::Max(100.0, $currentWidth - 10.0)
-            $ui.MediumPanel.Measure([Windows.Size]::new($availableWidth, [double]::PositiveInfinity))
-            $targetHeight = [Math]::Max(82.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($ui.MediumPanel.DesiredSize.Height + 10.0)))
-        } else {
-            $ui.DragArea.Visibility = 'Visible'; $ui.FiveHourRow.Visibility = 'Visible'; $ui.WeeklyRow.Visibility = 'Visible'; $ui.CreditDetailsPanel.Visibility = 'Visible'
-            $ui.CompactPanel.Visibility = 'Collapsed'; $ui.MediumPanel.Visibility = 'Collapsed'
-            $ui.RootGrid.Margin = [Windows.Thickness]::new(5); $ui.Card.Padding = [Windows.Thickness]::new(8,6,8,6)
-            $scale = $responsiveFont / 12.0
-            $ui.TitleText.FontSize = 12.0 * $scale
-            $ui.Updated.FontSize = 9.0 * $scale; $ui.ResetCountText.FontSize = 9.0 * $scale
-            $dotSize = 7.0 * $scale
-            $ui.PulseDot.Width = $dotSize; $ui.PulseDot.Height = $dotSize; $ui.PulseDot.Margin = [Windows.Thickness]::new(0,0,7.0 * $scale,0)
-            $ui.FiveHourLabel.FontSize = 11.5 * $scale; $ui.FiveHourText.FontSize = 12.0 * $scale
-            $ui.FiveHourReset.FontSize = 9.0 * $scale; $ui.WeeklyLabel.FontSize = 11.5 * $scale; $ui.WeeklyText.FontSize = 12.0 * $scale
-            $ui.WeeklyReset.FontSize = 9.0 * $scale; $ui.CreditDetailsText.FontSize = 8.5 * $scale
-            $ui.TitleRow.Height = [Windows.GridLength]::new(21.0 * $scale); $ui.FiveHourMainRow.Height = [Windows.GridLength]::new(30.0 * $scale); $ui.WeeklyMainRow.Height = [Windows.GridLength]::new(30.0 * $scale)
-            $effectiveCreditLines = $script:creditDetailLineCount
-            Update-CreditDetailPanel -FontSize (8.5 * $scale)
-            $targetHeight = [Math]::Min($window.MaxHeight, 18.0 + (81.0 * $scale) + (13.0 * $scale * $effectiveCreditLines))
-        }
-        $targetHeight = [Math]::Max(92.0, [Math]::Min($window.MaxHeight, [Math]::Ceiling($targetHeight)))
+        $targetHeight = [Math]::Ceiling((($currentWidth - 4.0) * 178.0 / 348.0) + 4.0)
+        $targetHeight = [Math]::Max(72.0, [Math]::Min(204.0, $targetHeight))
         $window.MinHeight = $targetHeight; $script:targetContentHeight = $targetHeight
         if ($window.Height -lt $targetHeight) { $window.Height = $targetHeight }
     } finally { $script:adjustingResponsiveSize = $false }
@@ -1679,11 +1958,31 @@ if (-not $ValidateUI) { Update-WindowPresence }
 if ($ValidateUI) { Update-Display } else { Update-Display -FastStart; $script:lastDisplayRefresh = [datetime]::Now }
 if ($ValidateUI) {
     $window.Height = $script:targetContentHeight
+    if (-not [string]::IsNullOrWhiteSpace($ValidateImage)) {
+        $window.Show(); $window.UpdateLayout()
+        $bitmap = New-Object Windows.Media.Imaging.RenderTargetBitmap ([int][Math]::Ceiling($window.Width)),([int][Math]::Ceiling($window.Height)),96,96,([Windows.Media.PixelFormats]::Pbgra32)
+        $bitmap.Render($ui.RootGrid)
+        $encoder = New-Object Windows.Media.Imaging.PngBitmapEncoder
+        $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
+        $stream = [IO.File]::Create($ValidateImage)
+        try { $encoder.Save($stream) } finally { $stream.Dispose() }
+    }
     if ($ValidateCustomDialog) {
         try { [void](Show-CustomColorDialog); Write-Output 'CUSTOM_DIALOG_OK' }
         catch { Write-Output ('CUSTOM_DIALOG_ERROR=' + $_.Exception.Message); $window.Close(); exit 1 }
     }
     Write-Output 'UI_OK'
+    $originalBreathingMode = $script:breathingMode
+    foreach ($testMode in @(0,1,2,3,0)) {
+        $script:breathingMode = $testMode
+        Set-QuotaState -State $script:lastVisualState -Force
+        if ($ui.CircleRing.Stroke.HasAnimatedProperties -ne ($testMode -ge 1)) { throw 'Outline breathing switch failed' }
+        if ($ui.CircleRing.Fill.HasAnimatedProperties -ne ($testMode -ge 2)) { throw 'Circle breathing switch failed' }
+        if ($ui.RightPill.Background.HasAnimatedProperties -ne ($testMode -ge 3)) { throw 'Panel breathing switch failed' }
+    }
+    $script:breathingMode = $originalBreathingMode
+    Set-QuotaState -State $script:lastVisualState -Force
+    Write-Output 'BREATHING_SWITCH_OK'
     Write-Output ('COLOR=' + $ui.PulseDot.Fill.ToString())
     Write-Output ('FIVE_HOUR_TEXT=' + $ui.FiveHourText.Text)
     Write-Output ('FIVE_HOUR_RESET=' + $ui.FiveHourReset.Text)
@@ -1700,11 +1999,21 @@ if ($ValidateUI) {
     Write-Output ('RESET_WEIGHT=' + $ui.ResetCountText.FontWeight.ToString())
     Write-Output ('WEEKLY_RESET=' + $ui.WeeklyReset.Text)
     Write-Output ('CREDIT_DETAILS=' + ($ui.CreditDetailsText.Text -replace [Environment]::NewLine, ' | '))
+    Write-Output ('PILL_FIVE_HOUR=' + $ui.CircleFiveHourText.Text)
+    Write-Output ('PILL_WEEKLY=' + $ui.CircleWeeklyText.Text)
+    Write-Output ('PILL_RESET=' + $ui.PillResetCount.Text)
+    Write-Output ('PILL_RING_COLOR=' + $ui.CircleRing.Stroke.ToString())
     $layoutName = if ($ui.CompactPanel.Visibility -eq 'Visible') { 'compact' } elseif ($ui.MediumPanel.Visibility -eq 'Visible') { 'medium' } else { 'wide' }
     $visibleFont = if ($layoutName -eq 'compact') { $ui.CompactTitle.FontSize } elseif ($layoutName -eq 'medium') { $ui.MediumTitle.FontSize } else { $ui.TitleText.FontSize }
     $resetAlignment = if ($layoutName -eq 'compact') { $ui.CompactResetCount.TextAlignment } elseif ($layoutName -eq 'medium') { $ui.MediumResetCount.TextAlignment } else { 'TwoColumn' }
     Write-Output ('VISIBLE_FONT={0:0.0};RESET_ALIGNMENT={1}' -f $visibleFont, $resetAlignment)
     Write-Output ('LAYOUT={0};WIDTH={1};HEIGHT={2}' -f $layoutName, [Math]::Round($window.Width), [Math]::Round($window.Height))
+    $area = Get-WindowWorkArea
+    $window.Left = $area[0]; $window.Top = $area[1] + 80
+    [void](Dock-WindowAtNearestEdge)
+    $hiddenPixels = [Math]::Round(($window.Left + $window.Width) - $area[0], 1)
+    Show-WindowFromEdge
+    Write-Output ('EDGE_HIDE=left;REVEAL={0};VISIBLE_LEFT={1}' -f $hiddenPixels, [Math]::Round($window.Left, 1))
     $window.Close()
     exit
 }

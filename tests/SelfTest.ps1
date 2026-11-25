@@ -110,6 +110,9 @@ try {
     if ($uiCustom -notcontains 'HEX_NORMALIZED=#4378BC') { throw 'HEX 色号输入没有被正确识别' }
     if ($uiCustom -notcontains 'CUSTOM_DIALOG_OK') { throw '自定义颜色窗口无法正常打开' }
     if ($uiZh -notcontains 'TRANSPARENT_WINDOW=True' -or $uiEn -notcontains 'TRANSPARENT_WINDOW=True') { throw '窗口透明圆角外观未保持' }
+    if ($uiZh -notcontains 'PILL_FIVE_HOUR=75%' -or $uiZh -notcontains 'PILL_WEEKLY=58%') { throw '圆形额度区没有完整显示两项额度' }
+    if ($uiZh -notcontains 'PILL_RING_COLOR=#FF34C759') { throw '圆环颜色没有与 5 小时额度保持一致' }
+    if (-not ($uiZh -match 'EDGE_HIDE=left;REVEAL=8;VISIBLE_LEFT=')) { throw '贴边隐藏或鼠标唤出位置不正确' }
     if (-not ($uiZh -match 'WEEKLY_RESET=\d{1,2}月\d{1,2}日 \d{2}:\d{2}')) { throw '中文版日期未使用中文格式' }
     if (-not ($uiEn -match 'WEEKLY_RESET=[A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}') -or ($uiEn -match 'WEEKLY_RESET=.*月')) { throw '英文版日期未使用英文格式' }
     if (-not ($uiZh -match 'FIVE_HOUR_TEXT=75%') -or -not ($uiEn -match 'FIVE_HOUR_TEXT=75%')) { throw '界面未恢复显示 5 小时额度' }

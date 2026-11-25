@@ -6,3 +6,9 @@ quota-cache.json
 *.png
 Thumbs.db
 .DS_Store
+promo/.deps/
+promo/*.wav
+promo/*.mp4
+!promo/Quota_Buddy_Desktop_1125.mp4
+promo/__pycache__/
+dist/
